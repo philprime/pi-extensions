@@ -166,6 +166,14 @@ function splitShellCommands(command: string): string[] | undefined {
 			return undefined;
 		}
 
+		if (character === "<" || character === ">") {
+			const length = benignRedirectionLength(command, index);
+			if (length > 0) {
+				index += length - 1;
+				continue;
+			}
+		}
+
 		if (
 			character === "\n" ||
 			character === ";" ||
@@ -185,6 +193,30 @@ function splitShellCommands(command: string): string[] | undefined {
 	if (quote !== undefined) return undefined;
 	addCommand(command.length);
 	return commands;
+}
+
+function benignRedirectionLength(command: string, index: number): number {
+	const boundary = (end: number): number => {
+		const next = command[end];
+		return next === undefined || /[\s|;&<>()]/.test(next) ? end - index : 0;
+	};
+
+	if (command[index + 1] === "&") {
+		let end = index + 2;
+		if (command[end] === "-") {
+			end++;
+		} else {
+			while (command[end] >= "0" && command[end] <= "9") end++;
+			if (end === index + 2) return 0;
+		}
+		return boundary(end);
+	}
+
+	if (command.startsWith("/dev/null", index + 1)) {
+		return boundary(index + 1 + "/dev/null".length);
+	}
+
+	return 0;
 }
 
 function hasUnquotedRedirection(command: string): boolean {
@@ -213,7 +245,11 @@ function hasUnquotedRedirection(command: string): boolean {
 			continue;
 		}
 
-		if (character === "<" || character === ">") return true;
+		if (character === "<" || character === ">") {
+			const length = benignRedirectionLength(command, index);
+			if (length === 0) return true;
+			index += length - 1;
+		}
 	}
 
 	return false;

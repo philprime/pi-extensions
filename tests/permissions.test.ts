@@ -210,10 +210,54 @@ test("prompts for each unallowlisted command in a pipeline and offers an amend o
 	assert.match(selectCalls[1].options[1], /unapproved-head -250 \*/);
 });
 
+test("allows a pipeline with stderr redirected to stdout when every stage matches an allow rule", async () => {
+	const projectDirectory = createProject(["sentry issue view *", "head *"]);
+	const { result, selectCalls } = await invoke(
+		"sentry issue view 7642532706 --json 2>&1 | head -100",
+		projectDirectory,
+	);
+
+	assert.equal(result, undefined);
+	assert.deepEqual(selectCalls, []);
+});
+
+test("requires approval when a word follows the file descriptor duplication", async () => {
+	const projectDirectory = createProject(["sentry issue view *"]);
+	const { result, selectCalls } = await invoke(
+		"sentry issue view 7642532706 --json 2>&1extra",
+		projectDirectory,
+	);
+
+	assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+	assert.equal(selectCalls.length, 1);
+});
+
+test("allows a command with stderr redirected to /dev/null when it matches an allow rule", async () => {
+	const projectDirectory = createProject(["sentry trace logs *"]);
+	const { result, selectCalls } = await invoke(
+		"sentry trace logs demo/ios/a17e6b9dc5dd4a7b88f546fac733f61c --json 2>/dev/null",
+		projectDirectory,
+	);
+
+	assert.equal(result, undefined);
+	assert.deepEqual(selectCalls, []);
+});
+
+test("allows a pipeline with stderr redirected to /dev/null when every stage matches an allow rule", async () => {
+	const projectDirectory = createProject(["sentry trace logs *", "head *"]);
+	const { result, selectCalls } = await invoke(
+		"sentry trace logs demo/ios/a17e6b9dc5dd4a7b88f546fac733f61c --json 2>/dev/null | head -100",
+		projectDirectory,
+	);
+
+	assert.equal(result, undefined);
+	assert.deepEqual(selectCalls, []);
+});
+
 test("prompts for commands on both sides of a pipeline containing a redirection", async () => {
 	const projectDirectory = createProject([]);
 	const { result, selectCalls } = await invoke(
-		'grep -R "SentryDataCollectionObjCOptions" -n DerivedData /tmp 2>/dev/null | head -100',
+		"unapproved-search DerivedData 2>/dev/null | unapproved-head -100",
 		projectDirectory,
 		["Yes", "No"],
 	);
@@ -222,15 +266,15 @@ test("prompts for commands on both sides of a pipeline containing a redirection"
 	assert.equal(selectCalls.length, 2);
 	assert.match(
 		selectCalls[0].message,
-		/grep -R "SentryDataCollectionObjCOptions" -n DerivedData \/tmp 2>\/dev\/null/,
+		/unapproved-search DerivedData 2>\/dev\/null/,
 	);
-	assert.match(selectCalls[1].message, /head -100/);
+	assert.match(selectCalls[1].message, /unapproved-head -100/);
 });
 
 test("requires approval for a redirected command matching an allow rule", async () => {
 	const projectDirectory = createProject(["grep *"]);
 	const { result, selectCalls } = await invoke(
-		"grep value file 2>/dev/null",
+		"grep value file 2>errors.log",
 		projectDirectory,
 	);
 
