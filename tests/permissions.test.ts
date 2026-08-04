@@ -352,6 +352,112 @@ test("serializes approval dialogs from concurrent Bash calls", async () => {
 	assert.deepEqual(await second, { block: true, reason: "Blocked by user" });
 });
 
+test("blocks gh pr create despite a matching allow rule", async () => {
+	const projectDirectory = createProject(["gh *"]);
+	const { result, selectCalls } = await invoke(
+		'gh pr create --title "New feature" --body "Details"',
+		projectDirectory,
+	);
+
+	assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+	assert.equal(selectCalls.length, 1);
+	assert.match(selectCalls[0].message, /gh pr create/);
+});
+
+test("blocks gh pr create after global flags", async () => {
+	const projectDirectory = createProject(["gh *"]);
+	const { result, selectCalls } = await invoke(
+		"gh pr create -R owner/repo --fill",
+		projectDirectory,
+	);
+
+	assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+	assert.equal(selectCalls.length, 1);
+});
+
+test("allows gh pr view despite gh mutations being blocked", async () => {
+	const projectDirectory = createProject(["gh *"]);
+	const { result, selectCalls } = await invoke(
+		"gh pr view 123 --json title",
+		projectDirectory,
+	);
+
+	assert.equal(result, undefined);
+	assert.deepEqual(selectCalls, []);
+});
+
+test("blocks rm despite a matching allow rule", async () => {
+	const projectDirectory = createProject(["rm *"]);
+	const { result, selectCalls } = await invoke(
+		"rm -rf build",
+		projectDirectory,
+	);
+
+	assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+	assert.equal(selectCalls.length, 1);
+	assert.match(selectCalls[0].message, /rm -rf build/);
+});
+
+test("blocks git reset and git clean despite a matching allow rule", async () => {
+	const projectDirectory = createProject(["git *"]);
+
+	for (const command of ["git reset --hard HEAD~1", "git clean -fd"]) {
+		const { result, selectCalls } = await invoke(command, projectDirectory, [
+			"No",
+		]);
+		assert.deepEqual(
+			result,
+			{ block: true, reason: "Blocked by user" },
+			command,
+		);
+		assert.equal(selectCalls.length, 1, command);
+	}
+});
+
+test("auto-allows a built-in safe command without any project allow rule", async () => {
+	const projectDirectory = createProject([]);
+	const { result, selectCalls } = await invoke(
+		"cat Sources/Sentry/SentryClient.m",
+		projectDirectory,
+	);
+
+	assert.equal(result, undefined);
+	assert.deepEqual(selectCalls, []);
+});
+
+test("auto-allows built-in read-only git without any project allow rule", async () => {
+	const projectDirectory = createProject([]);
+	const { result, selectCalls } = await invoke(
+		"git status --short",
+		projectDirectory,
+	);
+
+	assert.equal(result, undefined);
+	assert.deepEqual(selectCalls, []);
+});
+
+test("auto-allows a pipeline of built-in safe commands without any project allow rule", async () => {
+	const projectDirectory = createProject([]);
+	const { result, selectCalls } = await invoke(
+		"grep -R token Sources | head -20",
+		projectDirectory,
+	);
+
+	assert.equal(result, undefined);
+	assert.deepEqual(selectCalls, []);
+});
+
+test("still prompts for a command that is neither built-in nor allowlisted", async () => {
+	const projectDirectory = createProject([]);
+	const { result, selectCalls } = await invoke(
+		"unfamiliar-tool --do-something",
+		projectDirectory,
+	);
+
+	assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+	assert.equal(selectCalls.length, 1);
+});
+
 test("prompts for an unallowlisted command after shell control operators", async () => {
 	const projectDirectory = createProject(["git add *"]);
 

@@ -3,6 +3,118 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
+// Built-in read-only commands that are always safe to run automatically,
+// even without a project allow rule. Keep this list free of any command that
+// can mutate the working tree, delete data, or publish information.
+const DEFAULT_ALLOW_RULES: string[] = [
+	// File and directory inspection
+	"cat:*",
+	"head:*",
+	"tail:*",
+	"nl:*",
+	"wc:*",
+	"ls:*",
+	"pwd",
+	"find:*",
+	"stat:*",
+	"file:*",
+	"tree:*",
+	"realpath:*",
+	"basename:*",
+	"dirname:*",
+	// Search and text processing
+	"rg:*",
+	"grep:*",
+	"sed:*",
+	"awk:*",
+	"sort:*",
+	"uniq:*",
+	"comm:*",
+	"cut:*",
+	"tr:*",
+	"diff:*",
+	"jq:*",
+	"yq:*",
+	"xargs:*",
+	// Miscellaneous read-only utilities
+	"date:*",
+	"echo:*",
+	"true",
+	"test:*",
+	"command -v:*",
+	"which:*",
+	"uname:*",
+	"base64:*",
+	// Read-only git inspection
+	"git status:*",
+	"git log:*",
+	"git diff:*",
+	"git show:*",
+	"git blame:*",
+	"git grep:*",
+	"git describe:*",
+	"git rev-parse:*",
+	"git rev-list:*",
+	"git merge-base:*",
+	"git ls-files:*",
+	"git ls-tree:*",
+	"git ls-remote:*",
+	"git show-ref:*",
+	"git reflog:*",
+	"git fetch:*",
+	"git branch --list:*",
+	"git branch --show-current:*",
+	"git branch -vv:*",
+	"git tag --list:*",
+	"git remote -v:*",
+	"git remote show:*",
+	"git stash list:*",
+	"git stash show:*",
+	"git worktree list:*",
+	"git config --get:*",
+	"git config --list:*",
+	// Read-only GitHub CLI inspection
+	"gh pr view:*",
+	"gh pr list:*",
+	"gh pr diff:*",
+	"gh pr checks:*",
+	"gh pr status:*",
+	"gh repo view:*",
+	"gh issue view:*",
+	"gh issue list:*",
+	"gh issue status:*",
+	"gh run view:*",
+	"gh run list:*",
+	"gh release view:*",
+	"gh release list:*",
+	"gh search:*",
+	"gh label list:*",
+	"gh auth status:*",
+];
+
+// Commands that must never be auto-allowed, even when a broad allow rule such
+// as `git *` or `gh *` matches. These either publish information or destroy
+// data. Blocked commands still prompt for explicit approval.
+const BLOCKED_FIRST_WORDS = new Set(["rm", "rmdir", "shred"]);
+const BLOCKED_GIT_SUBCOMMANDS = new Set([
+	"commit",
+	"push",
+	"reset",
+	"clean",
+	"rm",
+]);
+const BLOCKED_GH_ACTIONS = new Set([
+	"create",
+	"merge",
+	"close",
+	"reopen",
+	"delete",
+	"edit",
+	"comment",
+	"review",
+	"ready",
+]);
+
 function readJsonFile(filePath: string): unknown {
 	try {
 		return JSON.parse(fs.readFileSync(filePath, "utf8"));
@@ -87,6 +199,7 @@ function bashAllowRules(cwd: string): string[] {
 	const projectSettings = findProjectSettings(cwd);
 
 	return [
+		...DEFAULT_ALLOW_RULES,
 		...readBashAllowRules(
 			path.join(os.homedir(), ".claude", "settings.local.json"),
 		),
@@ -264,12 +377,7 @@ function isSimpleShellCommand(command: string): boolean {
 	);
 }
 
-function isBlockedCommand(command: string): boolean {
-	const words = shellWords(command).map((word) =>
-		word.replace(/^("|')|("|')$/g, ""),
-	);
-	if (words[0] !== "git") return false;
-
+function gitSubcommand(words: string[]): string | undefined {
 	for (let index = 1; index < words.length; index++) {
 		const word = words[index];
 		if (
@@ -288,9 +396,54 @@ function isBlockedCommand(command: string): boolean {
 		)
 			continue;
 		if (word.startsWith("-")) continue;
-		return word === "commit" || word === "push";
+		return word;
 	}
 
+	return undefined;
+}
+
+function isBlockedGhCommand(words: string[]): boolean {
+	const resource = words[1];
+	if (resource === undefined || resource.startsWith("-")) return false;
+
+	// `gh api` can mutate through a non-GET method or field flags.
+	if (resource === "api") {
+		for (let index = 2; index < words.length; index++) {
+			const word = words[index];
+			if (word === "-X" || word === "--method") {
+				const method = (words[index + 1] ?? "").toUpperCase();
+				if (method && method !== "GET") return true;
+				index++;
+				continue;
+			}
+			if (
+				word === "-f" ||
+				word === "-F" ||
+				word === "--field" ||
+				word === "--raw-field"
+			)
+				return true;
+		}
+		return false;
+	}
+
+	const action = words[2];
+	if (action === undefined || action.startsWith("-")) return false;
+	return BLOCKED_GH_ACTIONS.has(action);
+}
+
+function isBlockedCommand(command: string): boolean {
+	const words = shellWords(command).map((word) =>
+		word.replace(/^("|')|("|')$/g, ""),
+	);
+	const name = words[0];
+	if (name === undefined) return false;
+	if (BLOCKED_FIRST_WORDS.has(name)) return true;
+	if (name === "git") {
+		const subcommand = gitSubcommand(words);
+		return subcommand !== undefined && BLOCKED_GIT_SUBCOMMANDS.has(subcommand);
+	}
+	if (name === "gh") return isBlockedGhCommand(words);
 	return false;
 }
 
