@@ -502,6 +502,7 @@ function appendLocalBashRule(cwd: string, rule: string): string {
 function approvalMessage(
 	command: string,
 	description: string | undefined,
+	amendable: boolean,
 ): string {
 	return [
 		"Bash command",
@@ -513,7 +514,9 @@ function approvalMessage(
 		"",
 		"Do you want to proceed?",
 		"",
-		"Esc to cancel · Select option 2 to amend before saving",
+		amendable
+			? "Esc to cancel · Select option 2 to amend before saving"
+			: "Esc to cancel",
 	]
 		.filter((line): line is string => line !== undefined)
 		.join("\n");
@@ -552,6 +555,9 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 				(commandToApprove) => !isAllowedSimpleCommand(commandToApprove, rules),
 			);
 			for (const commandToApprove of commandsToApprove) {
+				// A saved rule can only auto-allow simple commands, so the amend
+				// option is misleading for redirections and unsupported syntax.
+				const amendable = isSimpleShellCommand(commandToApprove);
 				const defaultRule = suggestedRule(commandToApprove);
 				const saveChoice = `Yes, and don’t ask again for: ${defaultRule}`;
 				const choice = await ctx.ui.select(
@@ -560,8 +566,9 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 						typeof input.description === "string"
 							? input.description
 							: undefined,
+						amendable,
 					),
-					["Yes", saveChoice, "No"],
+					amendable ? ["Yes", saveChoice, "No"] : ["Yes", "No"],
 				);
 
 				if (choice === "Yes") continue;

@@ -282,6 +282,34 @@ test("requires approval for a redirected command matching an allow rule", async 
 	assert.equal(selectCalls.length, 1);
 });
 
+test("prompts without an amend option when a pipeline stage requires approval because of a redirection", async () => {
+	const projectDirectory = createProject([]);
+	const { result, selectCalls } = await invoke(
+		"cat package.json | jq '.name' > output.txt",
+		projectDirectory,
+		["No"],
+	);
+
+	assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+	assert.equal(selectCalls.length, 1);
+	assert.match(selectCalls[0].message, /jq '.name' > output.txt/);
+	assert.deepEqual(selectCalls[0].options, ["Yes", "No"]);
+	assert.doesNotMatch(selectCalls[0].message, /amend/);
+});
+
+test("prompts without an amend option for unsupported shell syntax", async () => {
+	const projectDirectory = createProject([]);
+	const { result, selectCalls } = await invoke(
+		"echo $(date)",
+		projectDirectory,
+		["No"],
+	);
+
+	assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+	assert.equal(selectCalls.length, 1);
+	assert.deepEqual(selectCalls[0].options, ["Yes", "No"]);
+});
+
 test("serializes approval dialogs from concurrent Bash calls", async () => {
 	const projectDirectory = createProject([]);
 	const handler = createHandler();
