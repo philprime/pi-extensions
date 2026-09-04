@@ -12,11 +12,16 @@ type ToolCallHandler = (
 
 const temporaryDirectories: string[] = [];
 
-function createProject(allow: string[]): string {
+function createEmptyProject(): string {
 	const projectDirectory = fs.mkdtempSync(
 		path.join(os.tmpdir(), "permissions-test-"),
 	);
 	temporaryDirectories.push(projectDirectory);
+	return projectDirectory;
+}
+
+function createProject(allow: string[]): string {
+	const projectDirectory = createEmptyProject();
 	const settingsDirectory = path.join(projectDirectory, ".claude");
 	fs.mkdirSync(settingsDirectory);
 	fs.writeFileSync(
@@ -26,6 +31,17 @@ function createProject(allow: string[]): string {
 		}),
 	);
 	return projectDirectory;
+}
+
+function writePiPermissions(
+	projectDirectory: string,
+	permissions: { allow?: string[]; deny?: string[] },
+): string {
+	const settingsDirectory = path.join(projectDirectory, ".pi");
+	fs.mkdirSync(settingsDirectory);
+	const settingsPath = path.join(settingsDirectory, "permissions.json");
+	fs.writeFileSync(settingsPath, JSON.stringify({ permissions }));
+	return settingsPath;
 }
 
 function createHandler(): ToolCallHandler {
@@ -46,11 +62,14 @@ async function invoke(
 	command: string,
 	cwd: string,
 	selectChoices: string[] = ["No"],
+	editedRule?: string,
 ): Promise<{
 	result: unknown;
 	selectCalls: Array<{ message: string; options: string[] }>;
+	notifications: Array<{ message: string; level: string }>;
 }> {
 	const selectCalls: Array<{ message: string; options: string[] }> = [];
+	const notifications: Array<{ message: string; level: string }> = [];
 	const handler = createHandler();
 	const result = await handler(
 		{ toolName: "bash", input: { command } },
@@ -62,10 +81,14 @@ async function invoke(
 					selectCalls.push({ message, options });
 					return selectChoices.shift();
 				},
+				editor: async () => editedRule,
+				notify: (message: string, level: string) => {
+					notifications.push({ message, level });
+				},
 			},
 		},
 	);
-	return { result, selectCalls };
+	return { result, selectCalls, notifications };
 }
 
 afterEach(() => {
@@ -83,6 +106,49 @@ test("allows a simple command matching a Bash allow rule", async () => {
 
 	assert.equal(result, undefined);
 	assert.deepEqual(selectCalls, []);
+});
+
+test("allows a Bash command matching a project Pi permission", async () => {
+	const projectDirectory = createEmptyProject();
+	writePiPermissions(projectDirectory, {
+		allow: ["Bash(project-tool deploy *)"],
+	});
+
+	const { result, selectCalls } = await invoke(
+		"project-tool deploy staging",
+		projectDirectory,
+	);
+
+	assert.equal(result, undefined);
+	assert.deepEqual(selectCalls, []);
+});
+
+test("allows a Bash command matching a global Pi permission", async () => {
+	const projectDirectory = createEmptyProject();
+	const temporaryHome = createEmptyProject();
+	const previousHome = process.env.HOME;
+	process.env.HOME = temporaryHome;
+	const globalPermissionsDirectory = path.join(temporaryHome, ".pi", "agent");
+	fs.mkdirSync(globalPermissionsDirectory, { recursive: true });
+	fs.writeFileSync(
+		path.join(globalPermissionsDirectory, "permissions.json"),
+		JSON.stringify({
+			permissions: { allow: ["Bash(global-tool inspect *)"] },
+		}),
+	);
+
+	try {
+		const { result, selectCalls } = await invoke(
+			"global-tool inspect target",
+			projectDirectory,
+		);
+
+		assert.equal(result, undefined);
+		assert.deepEqual(selectCalls, []);
+	} finally {
+		if (previousHome === undefined) delete process.env.HOME;
+		else process.env.HOME = previousHome;
+	}
 });
 
 test("allows a quoted grep pattern when grep is allowlisted", async () => {
@@ -118,6 +184,89 @@ test("allows any playwright-cli command matching a wildcard allow rule", async (
 
 	assert.equal(result, undefined);
 	assert.deepEqual(selectCalls, []);
+});
+
+test("blocks a Bash command matching a project Pi deny rule", async () => {
+	const projectDirectory = createEmptyProject();
+	writePiPermissions(projectDirectory, {
+		deny: ["Bash(cat *)"],
+	});
+
+	const { result, selectCalls } = await invoke(
+		"cat private.txt",
+		projectDirectory,
+	);
+
+	assert.deepEqual(result, {
+		block: true,
+		reason: 'Bash command matches deny rule "Bash(cat *)"',
+	});
+	assert.deepEqual(selectCalls, []);
+});
+
+test("saves new Bash permissions to Pi without changing Claude settings", async () => {
+	const projectDirectory = createProject([]);
+	const claudeSettingsPath = path.join(
+		projectDirectory,
+		".claude",
+		"settings.local.json",
+	);
+	const originalClaudeSettings = fs.readFileSync(claudeSettingsPath, "utf8");
+
+	const { result, notifications } = await invoke(
+		"release-tool deploy staging",
+		projectDirectory,
+		["Yes, and don’t ask again for: release-tool deploy staging *"],
+		"release-tool deploy *",
+	);
+
+	assert.equal(result, undefined);
+	const piPermissionsPath = path.join(
+		projectDirectory,
+		".pi",
+		"permissions.json",
+	);
+	assert.equal(fs.existsSync(piPermissionsPath), true);
+	assert.deepEqual(JSON.parse(fs.readFileSync(piPermissionsPath, "utf8")), {
+		permissions: { allow: ["Bash(release-tool deploy *)"] },
+	});
+	assert.equal(
+		fs.readFileSync(claudeSettingsPath, "utf8"),
+		originalClaudeSettings,
+	);
+	assert.deepEqual(notifications, [
+		{
+			message: `Saved Bash(release-tool deploy *) to ${path.join(projectDirectory, ".pi", "permissions.json")}`,
+			level: "info",
+		},
+	]);
+});
+
+test("preserves existing Pi permission content when saving", async () => {
+	const projectDirectory = createEmptyProject();
+	const permissionsPath = writePiPermissions(projectDirectory, {
+		allow: ["Read(*)"],
+		deny: ["Bash(git push *)"],
+	});
+	const existing = JSON.parse(fs.readFileSync(permissionsPath, "utf8"));
+	existing.audit = true;
+	fs.writeFileSync(permissionsPath, JSON.stringify(existing));
+
+	const { result } = await invoke(
+		"release-tool deploy staging",
+		projectDirectory,
+		["Yes, and don’t ask again for: release-tool deploy staging *"],
+		"release-tool deploy *",
+	);
+
+	assert.equal(result, undefined);
+	assert.deepEqual(JSON.parse(fs.readFileSync(permissionsPath, "utf8")), {
+		permissions: {
+			allow: ["Read(*)", "Bash(release-tool deploy *)"],
+			deny: ["Bash(git push *)"],
+		},
+		audit: true,
+	});
 });
 
 test("requires approval for a git commit despite a matching allow rule", async () => {
@@ -484,6 +633,22 @@ test("still prompts for a command that is neither built-in nor allowlisted", asy
 
 	assert.deepEqual(result, { block: true, reason: "Blocked by user" });
 	assert.equal(selectCalls.length, 1);
+});
+
+test("describes all configured permission sources when no UI is available", async () => {
+	const projectDirectory = createProject([]);
+	const handler = createHandler();
+
+	const result = await handler(
+		{ toolName: "bash", input: { command: "unfamiliar-tool --do-something" } },
+		{ cwd: projectDirectory, hasUI: false },
+	);
+
+	assert.deepEqual(result, {
+		block: true,
+		reason:
+			"Bash command is not allowed by configured permissions and no UI is available.",
+	});
 });
 
 test("prompts for an unallowlisted command after shell control operators", async () => {
