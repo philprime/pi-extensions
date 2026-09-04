@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, test } from "vitest";
+import { afterEach, test, vi } from "vitest";
 import permissionsExtension from "../extensions/permissions.ts";
 
 type ToolCallHandler = (
@@ -815,6 +815,30 @@ test("still prompts for a command that is neither built-in nor allowlisted", asy
 
 	assert.deepEqual(result, { block: true, reason: "Blocked by user" });
 	assert.equal(selectCalls.length, 1);
+});
+
+test("reads a global permission file only once per rule kind", async () => {
+	const temporaryHome = createEmptyProject();
+	const projectDirectory = path.join(temporaryHome, "project");
+	fs.mkdirSync(projectDirectory);
+	const previousHome = process.env.HOME;
+	process.env.HOME = temporaryHome;
+	const globalSettingsDirectory = path.join(temporaryHome, ".claude");
+	fs.mkdirSync(globalSettingsDirectory);
+	fs.writeFileSync(
+		path.join(globalSettingsDirectory, "settings.json"),
+		"invalid JSON",
+	);
+	const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+	try {
+		await invoke("unfamiliar-tool --do-something", projectDirectory);
+		assert.equal(warn.mock.calls.length, 2);
+	} finally {
+		warn.mockRestore();
+		if (previousHome === undefined) delete process.env.HOME;
+		else process.env.HOME = previousHome;
+	}
 });
 
 test("describes all configured permission sources when no UI is available", async () => {

@@ -223,11 +223,13 @@ function permissionPaths(cwd: string): string[] {
 	].filter((filePath): filePath is string => filePath !== undefined);
 
 	return [
-		path.join(home, ".claude", "settings.json"),
-		path.join(home, ".claude", "settings.local.json"),
-		path.join(home, ".pi", "agent", "permissions.json"),
-		path.join(home, ".pi", "agent", "permissions.local.json"),
-		...projectPaths,
+		...new Set([
+			path.join(home, ".claude", "settings.json"),
+			path.join(home, ".claude", "settings.local.json"),
+			path.join(home, ".pi", "agent", "permissions.json"),
+			path.join(home, ".pi", "agent", "permissions.local.json"),
+			...projectPaths,
+		]),
 	];
 }
 
