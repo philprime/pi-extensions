@@ -147,7 +147,7 @@ function readJsonObject(filePath: string): Record<string, unknown> {
 	return ensureObject(readJsonFile(filePath), filePath);
 }
 
-function readBashAllowRules(filePath: string): string[] {
+function readBashRules(filePath: string, kind: "allow" | "deny"): string[] {
 	try {
 		if (!fs.existsSync(filePath)) return [];
 		const settings = readJsonObject(filePath);
@@ -156,8 +156,8 @@ function readBashAllowRules(filePath: string): string[] {
 			`${filePath}.permissions`,
 		);
 		const rules = ensureArray(
-			permissions.allow,
-			`${filePath}.permissions.allow`,
+			permissions[kind],
+			`${filePath}.permissions.${kind}`,
 		);
 		const bashRules: string[] = [];
 
@@ -176,11 +176,14 @@ function readBashAllowRules(filePath: string): string[] {
 	}
 }
 
-function findProjectSettings(cwd: string): string | undefined {
+function findProjectFile(
+	cwd: string,
+	...relativePath: string[]
+): string | undefined {
 	let current = path.resolve(cwd);
 
 	while (true) {
-		const candidate = path.join(current, ".claude", "settings.local.json");
+		const candidate = path.join(current, ...relativePath);
 		if (fs.existsSync(candidate)) return candidate;
 
 		const parent = path.dirname(current);
@@ -189,22 +192,59 @@ function findProjectSettings(cwd: string): string | undefined {
 	}
 }
 
-function localSettingsPath(cwd: string): string {
+function findProjectSettings(
+	cwd: string,
+	fileName = "settings.local.json",
+): string | undefined {
+	return findProjectFile(cwd, ".claude", fileName);
+}
+
+function findProjectPermissions(
+	cwd: string,
+	fileName = "permissions.json",
+): string | undefined {
+	return findProjectFile(cwd, ".pi", fileName);
+}
+
+function localPermissionsPath(cwd: string): string {
 	return (
-		findProjectSettings(cwd) ?? path.join(cwd, ".claude", "settings.local.json")
+		findProjectPermissions(cwd, "permissions.local.json") ??
+		path.join(cwd, ".pi", "permissions.local.json")
+	);
+}
+
+function permissionPaths(cwd: string): string[] {
+	const home = os.homedir();
+	const projectPaths = [
+		findProjectSettings(cwd, "settings.json"),
+		findProjectSettings(cwd),
+		findProjectPermissions(cwd),
+		findProjectPermissions(cwd, "permissions.local.json"),
+	].filter((filePath): filePath is string => filePath !== undefined);
+
+	return [
+		...new Set([
+			path.join(home, ".claude", "settings.json"),
+			path.join(home, ".claude", "settings.local.json"),
+			path.join(home, ".pi", "agent", "permissions.json"),
+			path.join(home, ".pi", "agent", "permissions.local.json"),
+			...projectPaths,
+		]),
+	];
+}
+
+function bashRules(cwd: string, kind: "allow" | "deny"): string[] {
+	return permissionPaths(cwd).flatMap((filePath) =>
+		readBashRules(filePath, kind),
 	);
 }
 
 function bashAllowRules(cwd: string): string[] {
-	const projectSettings = findProjectSettings(cwd);
+	return [...DEFAULT_ALLOW_RULES, ...bashRules(cwd, "allow")];
+}
 
-	return [
-		...DEFAULT_ALLOW_RULES,
-		...readBashAllowRules(
-			path.join(os.homedir(), ".claude", "settings.local.json"),
-		),
-		...(projectSettings ? readBashAllowRules(projectSettings) : []),
-	];
+function bashDenyRules(cwd: string): string[] {
+	return bashRules(cwd, "deny");
 }
 
 function escapeRegExp(value: string): string {
@@ -479,7 +519,7 @@ function readWritableSettings(filePath: string): Record<string, unknown> {
 }
 
 function appendLocalBashRule(cwd: string, rule: string): string {
-	const settingsPath = localSettingsPath(cwd);
+	const settingsPath = localPermissionsPath(cwd);
 	fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
 
 	const settings = readWritableSettings(settingsPath);
@@ -531,6 +571,19 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 		const input = event.input as { command?: unknown; description?: unknown };
 		const command = String(input.command ?? "");
 		const commands = splitShellCommands(command);
+		const commandCandidates = commands?.length ? commands : [command];
+		const deniedRule = bashDenyRules(ctx.cwd).find((rule) =>
+			commandCandidates.some((candidate) =>
+				commandMatchesRule(candidate, rule),
+			),
+		);
+		if (deniedRule) {
+			return {
+				block: true,
+				reason: `Bash command matches deny rule "${normalizeBashRule(deniedRule)}"`,
+			};
+		}
+
 		const rules = bashAllowRules(ctx.cwd);
 		if (
 			commands?.length &&
@@ -544,7 +597,7 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 			return {
 				block: true,
 				reason:
-					"Bash command is not allowed by .claude/settings.local.json and no UI is available.",
+					"Bash command is not allowed by configured permissions and no UI is available.",
 			};
 		}
 
