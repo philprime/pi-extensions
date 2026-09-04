@@ -192,49 +192,57 @@ function findProjectFile(
 	}
 }
 
-function findProjectSettings(cwd: string): string | undefined {
-	return findProjectFile(cwd, ".claude", "settings.local.json");
+function findProjectSettings(
+	cwd: string,
+	fileName = "settings.local.json",
+): string | undefined {
+	return findProjectFile(cwd, ".claude", fileName);
 }
 
-function findProjectPermissions(cwd: string): string | undefined {
-	return findProjectFile(cwd, ".pi", "permissions.json");
+function findProjectPermissions(
+	cwd: string,
+	fileName = "permissions.json",
+): string | undefined {
+	return findProjectFile(cwd, ".pi", fileName);
 }
 
 function localPermissionsPath(cwd: string): string {
 	return (
-		findProjectPermissions(cwd) ?? path.join(cwd, ".pi", "permissions.json")
+		findProjectPermissions(cwd, "permissions.local.json") ??
+		path.join(cwd, ".pi", "permissions.local.json")
+	);
+}
+
+function permissionPaths(cwd: string): string[] {
+	const home = os.homedir();
+	const projectPaths = [
+		findProjectSettings(cwd, "settings.json"),
+		findProjectSettings(cwd),
+		findProjectPermissions(cwd),
+		findProjectPermissions(cwd, "permissions.local.json"),
+	].filter((filePath): filePath is string => filePath !== undefined);
+
+	return [
+		path.join(home, ".claude", "settings.json"),
+		path.join(home, ".claude", "settings.local.json"),
+		path.join(home, ".pi", "agent", "permissions.json"),
+		path.join(home, ".pi", "agent", "permissions.local.json"),
+		...projectPaths,
+	];
+}
+
+function bashRules(cwd: string, kind: "allow" | "deny"): string[] {
+	return permissionPaths(cwd).flatMap((filePath) =>
+		readBashRules(filePath, kind),
 	);
 }
 
 function bashAllowRules(cwd: string): string[] {
-	const projectSettings = findProjectSettings(cwd);
-	const projectPermissions = findProjectPermissions(cwd);
-
-	return [
-		...DEFAULT_ALLOW_RULES,
-		...readBashRules(
-			path.join(os.homedir(), ".claude", "settings.local.json"),
-			"allow",
-		),
-		...readBashRules(
-			path.join(os.homedir(), ".pi", "agent", "permissions.json"),
-			"allow",
-		),
-		...(projectSettings ? readBashRules(projectSettings, "allow") : []),
-		...(projectPermissions ? readBashRules(projectPermissions, "allow") : []),
-	];
+	return [...DEFAULT_ALLOW_RULES, ...bashRules(cwd, "allow")];
 }
 
 function bashDenyRules(cwd: string): string[] {
-	const projectPermissions = findProjectPermissions(cwd);
-
-	return [
-		...readBashRules(
-			path.join(os.homedir(), ".pi", "agent", "permissions.json"),
-			"deny",
-		),
-		...(projectPermissions ? readBashRules(projectPermissions, "deny") : []),
-	];
+	return bashRules(cwd, "deny");
 }
 
 function escapeRegExp(value: string): string {

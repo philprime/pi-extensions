@@ -36,10 +36,11 @@ function createProject(allow: string[]): string {
 function writePiPermissions(
 	projectDirectory: string,
 	permissions: { allow?: string[]; deny?: string[] },
+	fileName = "permissions.json",
 ): string {
 	const settingsDirectory = path.join(projectDirectory, ".pi");
-	fs.mkdirSync(settingsDirectory);
-	const settingsPath = path.join(settingsDirectory, "permissions.json");
+	fs.mkdirSync(settingsDirectory, { recursive: true });
+	const settingsPath = path.join(settingsDirectory, fileName);
 	fs.writeFileSync(settingsPath, JSON.stringify({ permissions }));
 	return settingsPath;
 }
@@ -108,6 +109,26 @@ test("allows a simple command matching a Bash allow rule", async () => {
 	assert.deepEqual(selectCalls, []);
 });
 
+test("allows a Bash command matching shared project Claude settings", async () => {
+	const projectDirectory = createEmptyProject();
+	const settingsDirectory = path.join(projectDirectory, ".claude");
+	fs.mkdirSync(settingsDirectory);
+	fs.writeFileSync(
+		path.join(settingsDirectory, "settings.json"),
+		JSON.stringify({
+			permissions: { allow: ["Bash(shared-claude-tool inspect *)"] },
+		}),
+	);
+
+	const { result, selectCalls } = await invoke(
+		"shared-claude-tool inspect target",
+		projectDirectory,
+	);
+
+	assert.equal(result, undefined);
+	assert.deepEqual(selectCalls, []);
+});
+
 test("allows a Bash command matching a project Pi permission", async () => {
 	const projectDirectory = createEmptyProject();
 	writePiPermissions(projectDirectory, {
@@ -121,6 +142,51 @@ test("allows a Bash command matching a project Pi permission", async () => {
 
 	assert.equal(result, undefined);
 	assert.deepEqual(selectCalls, []);
+});
+
+test("allows a Bash command matching a local project Pi permission", async () => {
+	const projectDirectory = createEmptyProject();
+	writePiPermissions(
+		projectDirectory,
+		{ allow: ["Bash(local-project-tool deploy *)"] },
+		"permissions.local.json",
+	);
+
+	const { result, selectCalls } = await invoke(
+		"local-project-tool deploy staging",
+		projectDirectory,
+	);
+
+	assert.equal(result, undefined);
+	assert.deepEqual(selectCalls, []);
+});
+
+test("allows a Bash command matching shared global Claude settings", async () => {
+	const projectDirectory = createEmptyProject();
+	const temporaryHome = createEmptyProject();
+	const previousHome = process.env.HOME;
+	process.env.HOME = temporaryHome;
+	const globalSettingsDirectory = path.join(temporaryHome, ".claude");
+	fs.mkdirSync(globalSettingsDirectory);
+	fs.writeFileSync(
+		path.join(globalSettingsDirectory, "settings.json"),
+		JSON.stringify({
+			permissions: { allow: ["Bash(global-claude-tool inspect *)"] },
+		}),
+	);
+
+	try {
+		const { result, selectCalls } = await invoke(
+			"global-claude-tool inspect target",
+			projectDirectory,
+		);
+
+		assert.equal(result, undefined);
+		assert.deepEqual(selectCalls, []);
+	} finally {
+		if (previousHome === undefined) delete process.env.HOME;
+		else process.env.HOME = previousHome;
+	}
 });
 
 test("allows a Bash command matching a global Pi permission", async () => {
@@ -140,6 +206,34 @@ test("allows a Bash command matching a global Pi permission", async () => {
 	try {
 		const { result, selectCalls } = await invoke(
 			"global-tool inspect target",
+			projectDirectory,
+		);
+
+		assert.equal(result, undefined);
+		assert.deepEqual(selectCalls, []);
+	} finally {
+		if (previousHome === undefined) delete process.env.HOME;
+		else process.env.HOME = previousHome;
+	}
+});
+
+test("allows a Bash command matching a local global Pi permission", async () => {
+	const projectDirectory = createEmptyProject();
+	const temporaryHome = createEmptyProject();
+	const previousHome = process.env.HOME;
+	process.env.HOME = temporaryHome;
+	const globalPermissionsDirectory = path.join(temporaryHome, ".pi", "agent");
+	fs.mkdirSync(globalPermissionsDirectory, { recursive: true });
+	fs.writeFileSync(
+		path.join(globalPermissionsDirectory, "permissions.local.json"),
+		JSON.stringify({
+			permissions: { allow: ["Bash(global-local-tool inspect *)"] },
+		}),
+	);
+
+	try {
+		const { result, selectCalls } = await invoke(
+			"global-local-tool inspect target",
 			projectDirectory,
 		);
 
@@ -186,25 +280,105 @@ test("allows any playwright-cli command matching a wildcard allow rule", async (
 	assert.deepEqual(selectCalls, []);
 });
 
-test("blocks a Bash command matching a project Pi deny rule", async () => {
+test("blocks Bash commands denied by all four project permission files", async () => {
 	const projectDirectory = createEmptyProject();
+	const claudeDirectory = path.join(projectDirectory, ".claude");
+	fs.mkdirSync(claudeDirectory);
+	fs.writeFileSync(
+		path.join(claudeDirectory, "settings.json"),
+		JSON.stringify({
+			permissions: { deny: ["Bash(cat shared-claude.txt)"] },
+		}),
+	);
+	fs.writeFileSync(
+		path.join(claudeDirectory, "settings.local.json"),
+		JSON.stringify({
+			permissions: { deny: ["Bash(cat local-claude.txt)"] },
+		}),
+	);
 	writePiPermissions(projectDirectory, {
-		deny: ["Bash(cat *)"],
+		deny: ["Bash(cat shared-pi.txt)"],
 	});
-
-	const { result, selectCalls } = await invoke(
-		"cat private.txt",
+	writePiPermissions(
 		projectDirectory,
+		{ deny: ["Bash(cat local-pi.txt)"] },
+		"permissions.local.json",
 	);
 
-	assert.deepEqual(result, {
-		block: true,
-		reason: 'Bash command matches deny rule "Bash(cat *)"',
-	});
-	assert.deepEqual(selectCalls, []);
+	for (const fileName of [
+		"shared-claude.txt",
+		"local-claude.txt",
+		"shared-pi.txt",
+		"local-pi.txt",
+	]) {
+		const command = `cat ${fileName}`;
+		const { result, selectCalls } = await invoke(command, projectDirectory);
+
+		assert.deepEqual(result, {
+			block: true,
+			reason: `Bash command matches deny rule "Bash(${command})"`,
+		});
+		assert.deepEqual(selectCalls, []);
+	}
 });
 
-test("saves new Bash permissions to Pi without changing Claude settings", async () => {
+test("blocks Bash commands denied by all four global permission files", async () => {
+	const projectDirectory = createEmptyProject();
+	const temporaryHome = createEmptyProject();
+	const previousHome = process.env.HOME;
+	process.env.HOME = temporaryHome;
+	const claudeDirectory = path.join(temporaryHome, ".claude");
+	fs.mkdirSync(claudeDirectory);
+	fs.writeFileSync(
+		path.join(claudeDirectory, "settings.json"),
+		JSON.stringify({
+			permissions: { deny: ["Bash(cat global-shared-claude.txt)"] },
+		}),
+	);
+	fs.writeFileSync(
+		path.join(claudeDirectory, "settings.local.json"),
+		JSON.stringify({
+			permissions: { deny: ["Bash(cat global-local-claude.txt)"] },
+		}),
+	);
+	const piDirectory = path.join(temporaryHome, ".pi", "agent");
+	fs.mkdirSync(piDirectory, { recursive: true });
+	fs.writeFileSync(
+		path.join(piDirectory, "permissions.json"),
+		JSON.stringify({
+			permissions: { deny: ["Bash(cat global-shared-pi.txt)"] },
+		}),
+	);
+	fs.writeFileSync(
+		path.join(piDirectory, "permissions.local.json"),
+		JSON.stringify({
+			permissions: { deny: ["Bash(cat global-local-pi.txt)"] },
+		}),
+	);
+
+	try {
+		for (const fileName of [
+			"global-shared-claude.txt",
+			"global-local-claude.txt",
+			"global-shared-pi.txt",
+			"global-local-pi.txt",
+		]) {
+			const command = `cat ${fileName}`;
+			const { result, selectCalls } = await invoke(command, projectDirectory);
+
+			assert.deepEqual(result, {
+				block: true,
+				reason: `Bash command matches deny rule "Bash(${command})"`,
+			});
+			assert.deepEqual(selectCalls, []);
+		}
+	} finally {
+		if (previousHome === undefined) delete process.env.HOME;
+		else process.env.HOME = previousHome;
+	}
+});
+
+test("saves new Bash permissions only to local Pi permissions", async () => {
 	const projectDirectory = createProject([]);
 	const claudeSettingsPath = path.join(
 		projectDirectory,
@@ -224,30 +398,38 @@ test("saves new Bash permissions to Pi without changing Claude settings", async 
 	const piPermissionsPath = path.join(
 		projectDirectory,
 		".pi",
-		"permissions.json",
+		"permissions.local.json",
 	);
 	assert.equal(fs.existsSync(piPermissionsPath), true);
 	assert.deepEqual(JSON.parse(fs.readFileSync(piPermissionsPath, "utf8")), {
 		permissions: { allow: ["Bash(release-tool deploy *)"] },
 	});
 	assert.equal(
+		fs.existsSync(path.join(projectDirectory, ".pi", "permissions.json")),
+		false,
+	);
+	assert.equal(
 		fs.readFileSync(claudeSettingsPath, "utf8"),
 		originalClaudeSettings,
 	);
 	assert.deepEqual(notifications, [
 		{
-			message: `Saved Bash(release-tool deploy *) to ${path.join(projectDirectory, ".pi", "permissions.json")}`,
+			message: `Saved Bash(release-tool deploy *) to ${path.join(projectDirectory, ".pi", "permissions.local.json")}`,
 			level: "info",
 		},
 	]);
 });
 
-test("preserves existing Pi permission content when saving", async () => {
+test("preserves existing local Pi permission content when saving", async () => {
 	const projectDirectory = createEmptyProject();
-	const permissionsPath = writePiPermissions(projectDirectory, {
-		allow: ["Read(*)"],
-		deny: ["Bash(git push *)"],
-	});
+	const permissionsPath = writePiPermissions(
+		projectDirectory,
+		{
+			allow: ["Read(*)"],
+			deny: ["Bash(git push *)"],
+		},
+		"permissions.local.json",
+	);
 	const existing = JSON.parse(fs.readFileSync(permissionsPath, "utf8"));
 	existing.audit = true;
 	fs.writeFileSync(permissionsPath, JSON.stringify(existing));
