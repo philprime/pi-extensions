@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -602,8 +603,56 @@ test("prompts for commands on both sides of a pipeline containing a redirection"
 	assert.match(selectCalls[1].message, /unapproved-head -100/);
 });
 
-test("requires approval for a redirected command matching an allow rule", async () => {
+test("allows an allowlisted command to redirect output to a new project file", async () => {
+	const projectDirectory = createProject([
+		"/Applications/Blender.app/Contents/MacOS/Blender *",
+	]);
+	const { result, selectCalls } = await invoke(
+		"/Applications/Blender.app/Contents/MacOS/Blender --background --factory-startup --python asset_generators/models/coastal_rock_v1/build_asset.py > tmp/coastal_rock/build.log 2>&1",
+		projectDirectory,
+	);
+
+	assert.equal(result, undefined);
+	assert.deepEqual(selectCalls, []);
+});
+
+test("blocks a redirected command when its executable command matches a deny rule", async () => {
+	const projectDirectory = createProject(["render-tool *"]);
+	writePiPermissions(projectDirectory, {
+		deny: ["Bash(render-tool run)"],
+	});
+
+	const { result, selectCalls } = await invoke(
+		"render-tool run > build.log",
+		projectDirectory,
+	);
+
+	assert.deepEqual(result, {
+		block: true,
+		reason: 'Bash command matches deny rule "Bash(render-tool run)"',
+	});
+	assert.deepEqual(selectCalls, []);
+});
+
+test("allows appending to an existing Git-ignored project file", async () => {
+	const projectDirectory = createProject(["render-tool *"]);
+	execFileSync("git", ["init", "--quiet"], { cwd: projectDirectory });
+	fs.writeFileSync(path.join(projectDirectory, ".gitignore"), "tmp/\n");
+	fs.mkdirSync(path.join(projectDirectory, "tmp"));
+	fs.writeFileSync(path.join(projectDirectory, "tmp", "build log.txt"), "old");
+
+	const { result, selectCalls } = await invoke(
+		'render-tool run >> "tmp/build log.txt"',
+		projectDirectory,
+	);
+
+	assert.equal(result, undefined);
+	assert.deepEqual(selectCalls, []);
+});
+
+test("requires approval before redirecting over an existing unignored file", async () => {
 	const projectDirectory = createProject(["grep *"]);
+	fs.writeFileSync(path.join(projectDirectory, "errors.log"), "existing log");
 	const { result, selectCalls } = await invoke(
 		"grep value file 2>errors.log",
 		projectDirectory,
@@ -613,17 +662,116 @@ test("requires approval for a redirected command matching an allow rule", async 
 	assert.equal(selectCalls.length, 1);
 });
 
+test("requires approval for hidden output paths", async () => {
+	const projectDirectory = createProject(["render-tool *"]);
+
+	for (const command of [
+		"render-tool run > .build.log",
+		"render-tool run > output/.cache/build.log",
+	]) {
+		const { result, selectCalls } = await invoke(command, projectDirectory);
+		assert.deepEqual(
+			result,
+			{ block: true, reason: "Blocked by user" },
+			command,
+		);
+		assert.equal(selectCalls.length, 1, command);
+	}
+});
+
+test("requires approval for output paths outside the project", async () => {
+	const projectDirectory = createProject(["render-tool *"]);
+	const outsidePath = path.join(path.dirname(projectDirectory), "outside.log");
+
+	for (const command of [
+		"render-tool run > ../outside.log",
+		`render-tool run > ${outsidePath}`,
+	]) {
+		const { result, selectCalls } = await invoke(command, projectDirectory);
+		assert.deepEqual(
+			result,
+			{ block: true, reason: "Blocked by user" },
+			command,
+		);
+		assert.equal(selectCalls.length, 1, command);
+	}
+});
+
+test("requires approval when an output path traverses a symbolic link", async () => {
+	const projectDirectory = createProject(["render-tool *"]);
+	const outsideDirectory = createEmptyProject();
+	fs.symlinkSync(outsideDirectory, path.join(projectDirectory, "output"));
+
+	const { result, selectCalls } = await invoke(
+		"render-tool run > output/build.log",
+		projectDirectory,
+	);
+
+	assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+	assert.equal(selectCalls.length, 1);
+});
+
+test("requires approval when an ignored output is a hard link", async () => {
+	const projectDirectory = createProject(["render-tool *"]);
+	execFileSync("git", ["init", "--quiet"], { cwd: projectDirectory });
+	fs.writeFileSync(path.join(projectDirectory, ".gitignore"), "tmp/\n");
+	fs.writeFileSync(path.join(projectDirectory, "source.txt"), "source");
+	fs.mkdirSync(path.join(projectDirectory, "tmp"));
+	fs.linkSync(
+		path.join(projectDirectory, "source.txt"),
+		path.join(projectDirectory, "tmp", "build.log"),
+	);
+
+	const { result, selectCalls } = await invoke(
+		"render-tool run > tmp/build.log",
+		projectDirectory,
+	);
+
+	assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+	assert.equal(selectCalls.length, 1);
+});
+
+test("requires approval for a dynamic output path", async () => {
+	const projectDirectory = createProject(["render-tool *"]);
+	const { result, selectCalls } = await invoke(
+		'render-tool run > "$LOG_PATH"',
+		projectDirectory,
+	);
+
+	assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+	assert.equal(selectCalls.length, 1);
+	assert.deepEqual(selectCalls[0].options, ["Yes", "No"]);
+});
+
+test("suggests a permission rule without a safe output redirection", async () => {
+	const projectDirectory = createProject([]);
+	const command = "render-tool run --fast > build.log";
+	const saveChoice = "Yes, and don’t ask again for: render-tool run --fast *";
+
+	const { result, selectCalls } = await invoke(
+		command,
+		projectDirectory,
+		[saveChoice],
+		"render-tool run *",
+	);
+
+	assert.equal(result, undefined);
+	assert.equal(selectCalls.length, 1);
+	assert.deepEqual(selectCalls[0].options, ["Yes", saveChoice, "No"]);
+	assert.doesNotMatch(selectCalls[0].options[1], /> build\.log/);
+});
+
 test("prompts without an amend option when a pipeline stage requires approval because of a redirection", async () => {
 	const projectDirectory = createProject([]);
 	const { result, selectCalls } = await invoke(
-		"cat package.json | jq '.name' > output.txt",
+		"cat package.json | jq '.name' > .output.txt",
 		projectDirectory,
 		["No"],
 	);
 
 	assert.deepEqual(result, { block: true, reason: "Blocked by user" });
 	assert.equal(selectCalls.length, 1);
-	assert.match(selectCalls[0].message, /jq '.name' > output.txt/);
+	assert.match(selectCalls[0].message, /jq '.name' > .output.txt/);
 	assert.deepEqual(selectCalls[0].options, ["Yes", "No"]);
 	assert.doesNotMatch(selectCalls[0].message, /amend/);
 });

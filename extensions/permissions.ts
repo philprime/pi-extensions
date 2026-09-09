@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -422,49 +423,188 @@ function benignRedirectionLength(command: string, index: number): number {
 	return 0;
 }
 
-function hasUnquotedRedirection(command: string): boolean {
+interface ParsedShellCommand {
+	command: string;
+	outputPaths: string[];
+}
+
+function parseRedirectionTarget(
+	command: string,
+	start: number,
+): { end: number; value: string } | undefined {
 	let quote: "'" | '"' | undefined;
+	let value = "";
+	let index = start;
 
-	for (let index = 0; index < command.length; index++) {
+	for (; index < command.length; index++) {
 		const character = command[index];
-
-		if (character === "\\") {
-			index++;
-			continue;
-		}
-
 		if (quote === "'") {
 			if (character === "'") quote = undefined;
+			else value += character;
 			continue;
 		}
-
 		if (quote === '"') {
 			if (character === '"') quote = undefined;
+			else if (character === "$" || character === "`") return undefined;
+			else if (character === "\\") {
+				if (++index >= command.length) return undefined;
+				value += command[index];
+			} else value += character;
 			continue;
 		}
-
+		if (/\s/.test(character) || "|;&<>".includes(character)) break;
 		if (character === "'" || character === '"') {
 			quote = character;
 			continue;
 		}
-
-		if (character === "<" || character === ">") {
-			const length = benignRedirectionLength(command, index);
-			if (length === 0) return true;
-			index += length - 1;
+		if (character === "\\") {
+			if (++index >= command.length) return undefined;
+			value += command[index];
+			continue;
 		}
+		if ("$`*?[]{}~".includes(character)) return undefined;
+		value += character;
 	}
 
+	if (quote !== undefined || value.length === 0) return undefined;
+	return { end: index, value };
+}
+
+function parseOutputRedirections(
+	command: string,
+): ParsedShellCommand | undefined {
+	let quote: "'" | '"' | undefined;
+	let lastCopiedIndex = 0;
+	let executableCommand = "";
+	const outputPaths: string[] = [];
+
+	for (let index = 0; index < command.length; index++) {
+		const character = command[index];
+		if (character === "\\") {
+			index++;
+			continue;
+		}
+		if (quote === "'") {
+			if (character === "'") quote = undefined;
+			continue;
+		}
+		if (quote === '"') {
+			if (character === '"') quote = undefined;
+			continue;
+		}
+		if (character === "'" || character === '"') {
+			quote = character;
+			continue;
+		}
+		if (character === "<") return undefined;
+		if (character !== ">") continue;
+
+		let redirectionStart = index;
+		while (
+			redirectionStart > 0 &&
+			/[0-9]/.test(command[redirectionStart - 1])
+		) {
+			redirectionStart--;
+		}
+		if (
+			redirectionStart > 0 &&
+			!/[\s|;&]/.test(command[redirectionStart - 1])
+		) {
+			redirectionStart = index;
+		}
+		executableCommand += command.slice(lastCopiedIndex, redirectionStart);
+
+		const benignLength = benignRedirectionLength(command, index);
+		if (benignLength > 0 && command[index + 1] === "&") {
+			index += benignLength - 1;
+			lastCopiedIndex = index + 1;
+			continue;
+		}
+
+		let targetStart = index + (command[index + 1] === ">" ? 2 : 1);
+		while (/\s/.test(command[targetStart] ?? "")) targetStart++;
+		const target = parseRedirectionTarget(command, targetStart);
+		if (!target) return undefined;
+		if (target.value !== "/dev/null") outputPaths.push(target.value);
+		index = target.end - 1;
+		lastCopiedIndex = target.end;
+	}
+
+	if (quote !== undefined) return undefined;
+	executableCommand += command.slice(lastCopiedIndex);
+	return { command: executableCommand.trim(), outputPaths };
+}
+
+function isPathInsideProject(filePath: string, cwd: string): boolean {
+	const relativePath = path.relative(
+		path.resolve(cwd),
+		path.resolve(cwd, filePath),
+	);
+	return (
+		relativePath.length > 0 &&
+		!path.isAbsolute(relativePath) &&
+		!relativePath.split(path.sep).some((part) => part.startsWith("."))
+	);
+}
+
+function hasSymlinkComponent(filePath: string, cwd: string): boolean {
+	const relativePath = path.relative(
+		path.resolve(cwd),
+		path.resolve(cwd, filePath),
+	);
+	let currentPath = path.resolve(cwd);
+	for (const part of relativePath.split(path.sep)) {
+		currentPath = path.join(currentPath, part);
+		try {
+			if (fs.lstatSync(currentPath).isSymbolicLink()) return true;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+			return true;
+		}
+	}
 	return false;
 }
 
-function isSimpleShellCommand(command: string): boolean {
-	const commands = splitShellCommands(command);
+function isExistingIgnoredFile(filePath: string, cwd: string): boolean {
+	const resolvedPath = path.resolve(cwd, filePath);
+	if (!fs.existsSync(resolvedPath)) return true;
+	try {
+		const stats = fs.statSync(resolvedPath);
+		if (!stats.isFile() || stats.nlink !== 1) return false;
+	} catch {
+		return false;
+	}
 	return (
-		commands?.length === 1 &&
-		commands[0] === command.trim() &&
-		!hasUnquotedRedirection(command)
+		spawnSync(
+			"git",
+			["check-ignore", "--quiet", "--", path.relative(cwd, resolvedPath)],
+			{ cwd, stdio: "ignore" },
+		).status === 0
 	);
+}
+
+function isSafeOutputPath(filePath: string, cwd: string): boolean {
+	return (
+		isPathInsideProject(filePath, cwd) &&
+		!hasSymlinkComponent(filePath, cwd) &&
+		isExistingIgnoredFile(filePath, cwd)
+	);
+}
+
+function parsedSimpleShellCommand(
+	command: string,
+	cwd: string,
+): ParsedShellCommand | undefined {
+	const commands = splitShellCommands(command);
+	if (commands?.length !== 1 || commands[0] !== command.trim())
+		return undefined;
+	const parsed = parseOutputRedirections(command);
+	if (
+		!parsed?.outputPaths.every((filePath) => isSafeOutputPath(filePath, cwd))
+	) {
+		return undefined;
+	}
+	return parsed;
 }
 
 function gitSubcommand(words: string[]): string | undefined {
@@ -547,11 +687,16 @@ function isBlockedCommand(command: string): boolean {
 	return false;
 }
 
-function isAllowedSimpleCommand(command: string, rules: string[]): boolean {
+function isAllowedSimpleCommand(
+	command: string,
+	rules: string[],
+	cwd: string,
+): boolean {
+	const parsed = parsedSimpleShellCommand(command, cwd);
 	return (
-		!isBlockedCommand(command) &&
-		isSimpleShellCommand(command) &&
-		rules.some((rule) => commandMatchesRule(command, rule))
+		parsed !== undefined &&
+		!isBlockedCommand(parsed.command) &&
+		rules.some((rule) => commandMatchesRule(parsed.command, rule))
 	);
 }
 
@@ -633,9 +778,14 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 		const commands = splitShellCommands(command);
 		const commandCandidates = commands?.length ? commands : [command];
 		const deniedRule = bashDenyRules(ctx.cwd).find((rule) =>
-			commandCandidates.some((candidate) =>
-				commandMatchesRule(candidate, rule),
-			),
+			commandCandidates.some((candidate) => {
+				const executableCommand = parseOutputRedirections(candidate)?.command;
+				return (
+					commandMatchesRule(candidate, rule) ||
+					(executableCommand !== undefined &&
+						commandMatchesRule(executableCommand, rule))
+				);
+			}),
 		);
 		if (deniedRule) {
 			return {
@@ -648,7 +798,7 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 		if (
 			commands?.length &&
 			commands.every((commandToCheck) =>
-				isAllowedSimpleCommand(commandToCheck, rules),
+				isAllowedSimpleCommand(commandToCheck, rules, ctx.cwd),
 			)
 		)
 			return undefined;
@@ -665,13 +815,20 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 			const commandsToApprove = (
 				commands && commands.length > 1 ? commands : [command]
 			).filter(
-				(commandToApprove) => !isAllowedSimpleCommand(commandToApprove, rules),
+				(commandToApprove) =>
+					!isAllowedSimpleCommand(commandToApprove, rules, ctx.cwd),
 			);
 			for (const commandToApprove of commandsToApprove) {
-				// A saved rule can only auto-allow simple commands, so the amend
-				// option is misleading for redirections and unsupported syntax.
-				const amendable = isSimpleShellCommand(commandToApprove);
-				const defaultRule = suggestedRule(commandToApprove);
+				// Only offer saved rules for commands whose syntax and output paths
+				// passed validation. Save the executable command, not its redirections.
+				const parsedCommand = parsedSimpleShellCommand(
+					commandToApprove,
+					ctx.cwd,
+				);
+				const amendable = parsedCommand !== undefined;
+				const defaultRule = suggestedRule(
+					parsedCommand?.command ?? commandToApprove,
+				);
 				const saveChoice = `Yes, and don’t ask again for: ${defaultRule}`;
 				const choice = await ctx.ui.select(
 					approvalMessage(
