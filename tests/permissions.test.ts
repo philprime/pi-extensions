@@ -795,6 +795,88 @@ test("auto-allows built-in read-only git without any project allow rule", async 
 	assert.deepEqual(selectCalls, []);
 });
 
+test("auto-allows additional built-in low-risk commands", async () => {
+	const projectDirectory = createProject([]);
+	const commands = [
+		"cmp before.txt after.txt",
+		"sleep 1",
+		"shasum archive.zip",
+		"strings AppBinary",
+		"nm AppBinary",
+		"sentry --help",
+		"sentry --version",
+		"sentry help issue view",
+		"sentry dashboard --help",
+		"sentry cli defaults --help",
+		"sentry auth status --json",
+		"sentry auth whoami --json",
+		"sentry cli defaults",
+		"sentry cli fix --dry-run",
+		"sentry cli import --dry-run",
+		"sentry cli upgrade --check",
+		"sentry dashboard list org/",
+		"sentry dashboard view org/project/dashboard",
+		"sentry dashboard revisions org/dashboard",
+		"sentry org list",
+		"sentry org view org",
+		"sentry project list org/",
+		"sentry project view org/project",
+		"sentry replay list org/project",
+		"sentry replay view replay-id",
+		"sentry release list org/project",
+		"sentry release view org/version",
+		"sentry release deploys org/version",
+		"sentry release propose-version --json",
+		"sentry repo list org",
+		"sentry team list org",
+		"sentry issue list org/project",
+		"sentry issue events PROJECT-1",
+		"sentry issue view PROJECT-1",
+		"sentry event list PROJECT-1",
+		"sentry event view event-id",
+		"sentry explore --json",
+		"sentry log list org/project",
+		"sentry log view log-id",
+		"sentry span list org/project",
+		"sentry span view span-id",
+		"sentry trace list org/project",
+		"sentry trace view 0123456789abcdef0123456789abcdef",
+		"sentry trace logs 0123456789abcdef0123456789abcdef",
+		"sentry trial list org",
+		"sentry schema issues list",
+		"git check-ignore build/output.js",
+		"bundle info rake",
+		"bundle show rake",
+	];
+
+	for (const command of commands) {
+		const { result, selectCalls } = await invoke(command, projectDirectory);
+		assert.equal(result, undefined, command);
+		assert.deepEqual(selectCalls, [], command);
+	}
+});
+
+test("keeps sensitive and mutating Sentry commands behind approval", async () => {
+	const projectDirectory = createProject([]);
+	const commands = [
+		"sentry api /api/0/projects/",
+		"sentry auth token",
+		"sentry auth status --show-token",
+		"sentry issue resolve PROJECT-1",
+		"sentry project delete org/project",
+	];
+
+	for (const command of commands) {
+		const { result, selectCalls } = await invoke(command, projectDirectory);
+		assert.deepEqual(
+			result,
+			{ block: true, reason: "Blocked by user" },
+			command,
+		);
+		assert.equal(selectCalls.length, 1, command);
+	}
+});
+
 test("auto-allows a pipeline of built-in safe commands without any project allow rule", async () => {
 	const projectDirectory = createProject([]);
 	const { result, selectCalls } = await invoke(

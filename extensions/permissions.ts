@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-// Built-in read-only commands that are always safe to run automatically,
+// Built-in low-risk commands that are always safe to run automatically,
 // even without a project allow rule. Keep this list free of any command that
 // can mutate the working tree, delete data, or publish information.
 const DEFAULT_ALLOW_RULES: string[] = [
@@ -18,6 +18,8 @@ const DEFAULT_ALLOW_RULES: string[] = [
 	"find:*",
 	"stat:*",
 	"file:*",
+	"strings:*",
+	"nm:*",
 	"tree:*",
 	"realpath:*",
 	"basename:*",
@@ -30,21 +32,24 @@ const DEFAULT_ALLOW_RULES: string[] = [
 	"sort:*",
 	"uniq:*",
 	"comm:*",
+	"cmp:*",
 	"cut:*",
 	"tr:*",
 	"diff:*",
 	"jq:*",
 	"yq:*",
 	"xargs:*",
-	// Miscellaneous read-only utilities
+	// Miscellaneous low-risk utilities
 	"date:*",
 	"echo:*",
+	"sleep:*",
 	"true",
 	"test:*",
 	"command -v:*",
 	"which:*",
 	"uname:*",
 	"base64:*",
+	"shasum:*",
 	// Read-only git inspection
 	"git status:*",
 	"git log:*",
@@ -56,6 +61,7 @@ const DEFAULT_ALLOW_RULES: string[] = [
 	"git rev-parse:*",
 	"git rev-list:*",
 	"git merge-base:*",
+	"git check-ignore:*",
 	"git ls-files:*",
 	"git ls-tree:*",
 	"git ls-remote:*",
@@ -90,6 +96,50 @@ const DEFAULT_ALLOW_RULES: string[] = [
 	"gh search:*",
 	"gh label list:*",
 	"gh auth status:*",
+	// Read-only Sentry inspection
+	"sentry --help",
+	"sentry --version",
+	"sentry * --help",
+	"sentry help:*",
+	"sentry auth status:*",
+	"sentry auth whoami:*",
+	"sentry cli defaults",
+	"sentry cli fix --dry-run",
+	"sentry cli import --dry-run",
+	"sentry cli upgrade --check",
+	"sentry dashboard list:*",
+	"sentry dashboard view:*",
+	"sentry dashboard revisions:*",
+	"sentry org list:*",
+	"sentry org view:*",
+	"sentry project list:*",
+	"sentry project view:*",
+	"sentry replay list:*",
+	"sentry replay view:*",
+	"sentry release list:*",
+	"sentry release view:*",
+	"sentry release deploys:*",
+	"sentry release propose-version:*",
+	"sentry repo list:*",
+	"sentry team list:*",
+	"sentry issue list:*",
+	"sentry issue events:*",
+	"sentry issue view:*",
+	"sentry event list:*",
+	"sentry event view:*",
+	"sentry explore:*",
+	"sentry log list:*",
+	"sentry log view:*",
+	"sentry span list:*",
+	"sentry span view:*",
+	"sentry trace list:*",
+	"sentry trace view:*",
+	"sentry trace logs:*",
+	"sentry trial list:*",
+	"sentry schema:*",
+	// Read-only dependency inspection
+	"bundle info:*",
+	"bundle show:*",
 ];
 
 // Commands that must never be auto-allowed, even when a broad allow rule such
@@ -472,6 +522,15 @@ function isBlockedGhCommand(words: string[]): boolean {
 	return BLOCKED_GH_ACTIONS.has(action);
 }
 
+function isBlockedSentryCommand(words: string[]): boolean {
+	if (words[1] !== "auth") return false;
+	if (words[2] === "token") return true;
+	return (
+		words[2] === "status" &&
+		words.slice(3).some((word) => word.startsWith("--show-token"))
+	);
+}
+
 function isBlockedCommand(command: string): boolean {
 	const words = shellWords(command).map((word) =>
 		word.replace(/^("|')|("|')$/g, ""),
@@ -484,6 +543,7 @@ function isBlockedCommand(command: string): boolean {
 		return subcommand !== undefined && BLOCKED_GIT_SUBCOMMANDS.has(subcommand);
 	}
 	if (name === "gh") return isBlockedGhCommand(words);
+	if (name === "sentry") return isBlockedSentryCommand(words);
 	return false;
 }
 
