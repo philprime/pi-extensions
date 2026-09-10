@@ -32,6 +32,7 @@
   },
   "pi": {
     "extensions": [
+      "./extensions/footer.ts",
       "./extensions/permissions.ts",
       "./extensions/run.ts"
     ],
