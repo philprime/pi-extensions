@@ -28,7 +28,7 @@
     "@earendil-works/pi-coding-agent": "0.80.10",
     "@types/node": "26.1.1",
     "typescript": "7.0.2",
-    "vitest": "4.1.10"
+    "vitest": "5.0.0"
   },
   "pi": {
     "extensions": [
