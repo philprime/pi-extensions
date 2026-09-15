@@ -584,11 +584,33 @@ function isExistingIgnoredFile(filePath: string, cwd: string): boolean {
 }
 
 function isSafeOutputPath(filePath: string, cwd: string): boolean {
-	return (
-		isPathInsideProject(filePath, cwd) &&
-		!hasSymlinkComponent(filePath, cwd) &&
-		isExistingIgnoredFile(filePath, cwd)
-	);
+	if (isPathInsideProject(filePath, cwd)) {
+		return (
+			!hasSymlinkComponent(filePath, cwd) &&
+			isExistingIgnoredFile(filePath, cwd)
+		);
+	}
+
+	const resolvedPath = path.resolve(cwd, filePath);
+	try {
+		// /tmp itself is a system symlink on macOS. Trust that root, but not
+		// symlinks beneath it that could redirect writes elsewhere.
+		const temporaryRoot = ["/tmp", fs.realpathSync("/tmp")].find((root) =>
+			isPathInsideProject(resolvedPath, root),
+		);
+		if (!temporaryRoot || hasSymlinkComponent(resolvedPath, temporaryRoot)) {
+			return false;
+		}
+	} catch {
+		return false;
+	}
+
+	try {
+		const stats = fs.lstatSync(resolvedPath);
+		return stats.isFile() && stats.nlink === 1;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "ENOENT";
+	}
 }
 
 function parsedSimpleShellCommand(

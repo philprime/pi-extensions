@@ -13,9 +13,9 @@ type ToolCallHandler = (
 
 const temporaryDirectories: string[] = [];
 
-function createEmptyProject(): string {
+function createEmptyProject(baseDirectory = os.tmpdir()): string {
 	const projectDirectory = fs.mkdtempSync(
-		path.join(os.tmpdir(), "permissions-test-"),
+		path.join(baseDirectory, "permissions-test-"),
 	);
 	temporaryDirectories.push(projectDirectory);
 	return projectDirectory;
@@ -679,14 +679,117 @@ test("requires approval for hidden output paths", async () => {
 	}
 });
 
-test("requires approval for output paths outside the project", async () => {
-	const projectDirectory = createProject(["render-tool *"]);
-	const outsidePath = path.join(path.dirname(projectDirectory), "outside.log");
+test("allows output redirection to new and existing files in /tmp", async () => {
+	const projectDirectory = createProject([]);
+	const outputDirectory = createEmptyProject("/tmp");
+	fs.writeFileSync(path.join(outputDirectory, "existing.log"), "old");
 
 	for (const command of [
-		"render-tool run > ../outside.log",
-		`render-tool run > ${outsidePath}`,
+		`echo value > ${outputDirectory}/new.log`,
+		`echo value > ${fs.realpathSync(outputDirectory)}/canonical.log`,
+		`echo value >> "${outputDirectory}/existing.log"`,
+		`echo value > "${outputDirectory}/nested/new log.txt" 2>&1`,
+		`echo value | head -1 > ${outputDirectory}/pipeline.log`,
+		`echo value > ${path.relative(projectDirectory, outputDirectory)}/relative.log`,
 	]) {
+		const { result, selectCalls } = await invoke(command, projectDirectory);
+		assert.equal(result, undefined, command);
+		assert.deepEqual(selectCalls, [], command);
+	}
+});
+
+test("allows an allowlisted make test with output redirected to /tmp", async () => {
+	const projectDirectory = createProject(["make test"]);
+	const { result, selectCalls } = await invoke(
+		"make test > /tmp/test.log 2>&1",
+		projectDirectory,
+	);
+	assert.equal(result, undefined);
+	assert.deepEqual(selectCalls, []);
+});
+
+test("allows /tmp output redirection without a UI", async () => {
+	const projectDirectory = createProject([]);
+	const outputDirectory = createEmptyProject("/tmp");
+	const result = await createHandler()(
+		{
+			toolName: "bash",
+			input: { command: `echo value > ${outputDirectory}/new.log` },
+		},
+		{ cwd: projectDirectory, hasUI: false },
+	);
+	assert.equal(result, undefined);
+});
+
+test("requires approval for unsafe output targets within /tmp", async () => {
+	const projectDirectory = createProject([]);
+	const outputDirectory = createEmptyProject("/tmp");
+	const sourcePath = path.join(projectDirectory, "source.txt");
+	fs.writeFileSync(sourcePath, "source");
+	fs.symlinkSync(sourcePath, path.join(outputDirectory, "symlink.log"));
+	fs.symlinkSync(projectDirectory, path.join(outputDirectory, "linked"));
+	fs.linkSync(sourcePath, path.join(outputDirectory, "hardlink.log"));
+
+	for (const target of [
+		`${outputDirectory}/symlink.log`,
+		`${outputDirectory}/linked/new.log`,
+		`${outputDirectory}/hardlink.log`,
+		outputDirectory,
+		`${outputDirectory}/.hidden.log`,
+	]) {
+		const { result, selectCalls } = await invoke(
+			`echo value > ${target}`,
+			projectDirectory,
+		);
+		assert.deepEqual(
+			result,
+			{ block: true, reason: "Blocked by user" },
+			target,
+		);
+		assert.equal(selectCalls.length, 1, target);
+	}
+});
+
+test("preserves command approval and deny rules for /tmp output", async () => {
+	const projectDirectory = createProject([]);
+	const outputDirectory = createEmptyProject("/tmp");
+	writePiPermissions(projectDirectory, { deny: ["Bash(echo denied)"] });
+
+	for (const command of [
+		`unapproved-tool > ${outputDirectory}/new.log`,
+		`echo value > ${outputDirectory}/new.log && unapproved-tool`,
+		`rm file > ${outputDirectory}/new.log`,
+	]) {
+		const { result, selectCalls } = await invoke(command, projectDirectory);
+		assert.deepEqual(
+			result,
+			{ block: true, reason: "Blocked by user" },
+			command,
+		);
+		assert.equal(selectCalls.length, 1, command);
+	}
+
+	const { result, selectCalls } = await invoke(
+		`echo denied > ${outputDirectory}/new.log`,
+		projectDirectory,
+	);
+	assert.deepEqual(result, {
+		block: true,
+		reason: 'Bash command matches deny rule "Bash(echo denied)"',
+	});
+	assert.deepEqual(selectCalls, []);
+});
+
+test("requires approval for output paths outside the project and /tmp", async () => {
+	const projectDirectory = createProject(["render-tool *"]);
+
+	for (const target of [
+		path.relative(projectDirectory, "/etc/outside.log"),
+		"/etc/outside.log",
+		"/tmp-other/outside.log",
+		"/tmp/../outside.log",
+	]) {
+		const command = `render-tool run > ${target}`;
 		const { result, selectCalls } = await invoke(command, projectDirectory);
 		assert.deepEqual(
 			result,
