@@ -713,12 +713,14 @@ function isAllowedSimpleCommand(
 	command: string,
 	rules: string[],
 	cwd: string,
+	sessionCommands: ReadonlySet<string>,
 ): boolean {
 	const parsed = parsedSimpleShellCommand(command, cwd);
 	return (
 		parsed !== undefined &&
 		!isBlockedCommand(parsed.command) &&
-		rules.some((rule) => commandMatchesRule(parsed.command, rule))
+		(sessionCommands.has(parsed.command) ||
+			rules.some((rule) => commandMatchesRule(parsed.command, rule)))
 	);
 }
 
@@ -791,9 +793,24 @@ function approvalMessage(
 
 export default function permissionsExtension(pi: ExtensionAPI) {
 	let approvalQueue = Promise.resolve();
+	let sessionApprovals = new Map<string, Set<string>>();
+
+	const resetSessionApprovals = () => {
+		// Replace the map so pending approvals cannot carry into another session.
+		sessionApprovals = new Map();
+	};
+	pi.on("session_start", resetSessionApprovals);
+	pi.on("session_shutdown", resetSessionApprovals);
 
 	pi.on("tool_call", async (event, ctx) => {
 		if (event.toolName !== "bash") return undefined;
+
+		const approvals = sessionApprovals;
+		let sessionCommands = approvals.get(ctx.cwd);
+		if (!sessionCommands) {
+			sessionCommands = new Set();
+			approvals.set(ctx.cwd, sessionCommands);
+		}
 
 		const input = event.input as { command?: unknown; description?: unknown };
 		const command = String(input.command ?? "");
@@ -820,7 +837,7 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 		if (
 			commands?.length &&
 			commands.every((commandToCheck) =>
-				isAllowedSimpleCommand(commandToCheck, rules, ctx.cwd),
+				isAllowedSimpleCommand(commandToCheck, rules, ctx.cwd, sessionCommands),
 			)
 		)
 			return undefined;
@@ -834,13 +851,26 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 		}
 
 		const approval = approvalQueue.then(async () => {
-			const commandsToApprove = (
-				commands && commands.length > 1 ? commands : [command]
-			).filter(
-				(commandToApprove) =>
-					!isAllowedSimpleCommand(commandToApprove, rules, ctx.cwd),
-			);
+			const sessionChanged = {
+				block: true,
+				reason: "Session changed during permission approval",
+			};
+			if (approvals !== sessionApprovals) return sessionChanged;
+
+			const commandsToApprove =
+				commands && commands.length > 1 ? commands : [command];
 			for (const commandToApprove of commandsToApprove) {
+				// Check at execution time so earlier approvals also cover queued calls
+				// and repeated stages within this command.
+				if (
+					isAllowedSimpleCommand(
+						commandToApprove,
+						rules,
+						ctx.cwd,
+						sessionCommands,
+					)
+				)
+					continue;
 				// Only offer saved rules for commands whose syntax and output paths
 				// passed validation. Save the executable command, not its redirections.
 				const parsedCommand = parsedSimpleShellCommand(
@@ -848,6 +878,10 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 					ctx.cwd,
 				);
 				const amendable = parsedCommand !== undefined;
+				const sessionApprovable =
+					parsedCommand !== undefined &&
+					!isBlockedCommand(parsedCommand.command);
+				const sessionChoice = "Allow for this session";
 				const defaultRule = suggestedRule(
 					parsedCommand?.command ?? commandToApprove,
 				);
@@ -860,16 +894,28 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 							: undefined,
 						amendable,
 					),
-					amendable ? ["Yes", saveChoice, "No"] : ["Yes", "No"],
+					[
+						"Yes",
+						...(amendable ? [saveChoice] : []),
+						...(sessionApprovable ? [sessionChoice] : []),
+						"No",
+					],
 				);
+				if (approvals !== sessionApprovals) return sessionChanged;
 
 				if (choice === "Yes") continue;
+
+				if (choice === sessionChoice && sessionApprovable) {
+					sessionCommands.add(parsedCommand.command);
+					continue;
+				}
 
 				if (choice === saveChoice) {
 					const editedRule = await ctx.ui.editor(
 						"Amend Bash permission rule",
 						defaultRule,
 					);
+					if (approvals !== sessionApprovals) return sessionChanged;
 					if (!editedRule?.trim()) {
 						return { block: true, reason: "Permission rule save cancelled" };
 					}
