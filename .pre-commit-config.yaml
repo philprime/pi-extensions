@@ -30,6 +30,16 @@ repos:
 
   - repo: local
     hooks:
+      - id: validate-skills
+        name: Validate skills
+        description: "Validate canonical skills against the Agent Skills spec"
+        language: system
+        files: ^skills/[^/]+/SKILL\.md$
+        entry: >-
+          bash -c 'for skill_file do uvx --from
+          "git+https://github.com/agentskills/agentskills.git#subdirectory=skills-ref"
+          skills-ref validate "${skill_file%/SKILL.md}" || exit 1; done' --
+
       - id: format-json
         name: Format JSON
         description: "Format JSON"
