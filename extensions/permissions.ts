@@ -713,14 +713,15 @@ function isAllowedSimpleCommand(
 	command: string,
 	rules: string[],
 	cwd: string,
-	sessionCommands: ReadonlySet<string>,
+	sessionRules: ReadonlySet<string>,
 ): boolean {
 	const parsed = parsedSimpleShellCommand(command, cwd);
 	return (
 		parsed !== undefined &&
 		!isBlockedCommand(parsed.command) &&
-		(sessionCommands.has(parsed.command) ||
-			rules.some((rule) => commandMatchesRule(parsed.command, rule)))
+		[...rules, ...sessionRules].some((rule) =>
+			commandMatchesRule(parsed.command, rule),
+		)
 	);
 }
 
@@ -784,7 +785,7 @@ function approvalMessage(
 		"Do you want to proceed?",
 		"",
 		amendable
-			? "Esc to cancel · Select option 2 to amend before saving"
+			? "Esc to cancel · Permission rules can be amended before applying"
 			: "Esc to cancel",
 	]
 		.filter((line): line is string => line !== undefined)
@@ -806,10 +807,10 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 		if (event.toolName !== "bash") return undefined;
 
 		const approvals = sessionApprovals;
-		let sessionCommands = approvals.get(ctx.cwd);
-		if (!sessionCommands) {
-			sessionCommands = new Set();
-			approvals.set(ctx.cwd, sessionCommands);
+		let sessionRules = approvals.get(ctx.cwd);
+		if (!sessionRules) {
+			sessionRules = new Set();
+			approvals.set(ctx.cwd, sessionRules);
 		}
 
 		const input = event.input as { command?: unknown; description?: unknown };
@@ -837,7 +838,7 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 		if (
 			commands?.length &&
 			commands.every((commandToCheck) =>
-				isAllowedSimpleCommand(commandToCheck, rules, ctx.cwd, sessionCommands),
+				isAllowedSimpleCommand(commandToCheck, rules, ctx.cwd, sessionRules),
 			)
 		)
 			return undefined;
@@ -863,12 +864,7 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 				// Check at execution time so earlier approvals also cover queued calls
 				// and repeated stages within this command.
 				if (
-					isAllowedSimpleCommand(
-						commandToApprove,
-						rules,
-						ctx.cwd,
-						sessionCommands,
-					)
+					isAllowedSimpleCommand(commandToApprove, rules, ctx.cwd, sessionRules)
 				)
 					continue;
 				// Only offer saved rules for commands whose syntax and output paths
@@ -905,12 +901,8 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 
 				if (choice === "Yes") continue;
 
-				if (choice === sessionChoice && sessionApprovable) {
-					sessionCommands.add(parsedCommand.command);
-					continue;
-				}
-
-				if (choice === saveChoice) {
+				const allowForSession = choice === sessionChoice && sessionApprovable;
+				if (choice === saveChoice || allowForSession) {
 					const editedRule = await ctx.ui.editor(
 						"Amend Bash permission rule",
 						defaultRule,
@@ -918,6 +910,11 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 					if (approvals !== sessionApprovals) return sessionChanged;
 					if (!editedRule?.trim()) {
 						return { block: true, reason: "Permission rule save cancelled" };
+					}
+
+					if (allowForSession) {
+						sessionRules.add(normalizeBashRule(editedRule).slice(5, -1));
+						continue;
 					}
 
 					try {

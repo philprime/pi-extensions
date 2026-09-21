@@ -69,14 +69,16 @@ async function invoke(
 	command: string,
 	cwd: string,
 	selectChoices: string[] = ["No"],
-	editedRule?: string,
+	editedRule?: string | null,
 	handler = createHandler(),
 ): Promise<{
 	result: unknown;
 	selectCalls: Array<{ message: string; options: string[] }>;
+	editorCalls: Array<{ title: string; initialValue: string }>;
 	notifications: Array<{ message: string; level: string }>;
 }> {
 	const selectCalls: Array<{ message: string; options: string[] }> = [];
+	const editorCalls: Array<{ title: string; initialValue: string }> = [];
 	const notifications: Array<{ message: string; level: string }> = [];
 	const result = await handler(
 		{ toolName: "bash", input: { command } },
@@ -88,14 +90,17 @@ async function invoke(
 					selectCalls.push({ message, options });
 					return selectChoices.shift();
 				},
-				editor: async () => editedRule,
+				editor: async (title: string, initialValue: string) => {
+					editorCalls.push({ title, initialValue });
+					return editedRule === null ? undefined : (editedRule ?? initialValue);
+				},
 				notify: (message: string, level: string) => {
 					notifications.push({ message, level });
 				},
 			},
 		},
 	);
-	return { result, selectCalls, notifications };
+	return { result, selectCalls, editorCalls, notifications };
 }
 
 afterEach(() => {
@@ -104,17 +109,17 @@ afterEach(() => {
 	}
 });
 
-test("session approval reuses only the exact command without persisting it", async () => {
+test("session approval can use an exact rule without persisting it", async () => {
 	const cwd = createProject([]);
 	const handler = createHandler();
 	const settingsPath = path.join(cwd, ".claude", "settings.local.json");
 	const originalSettings = fs.readFileSync(settingsPath, "utf8");
-	const command = 'session-tool run "*"';
+	const command = "session-tool run first";
 	const first = await invoke(
 		command,
 		cwd,
 		["Allow for this session"],
-		undefined,
+		command,
 		handler,
 	);
 	assert.equal(first.result, undefined);
@@ -141,6 +146,153 @@ test("session approval reuses only the exact command without persisting it", asy
 		assert.deepEqual(denied.result, { block: true, reason: "Blocked by user" });
 		assert.equal(denied.selectCalls.length, 1);
 	}
+});
+
+for (const rule of [
+	"session-tool run *",
+	"session-tool run:*",
+	"  Bash(session-tool run *)  ",
+]) {
+	test(`session approval edits and matches rule ${rule}`, async () => {
+		const cwd = createProject([]);
+		const handler = createHandler();
+		const command = "session-tool run first > output.log";
+		const first = await invoke(
+			command,
+			cwd,
+			["Allow for this session"],
+			rule,
+			handler,
+		);
+		assert.equal(first.result, undefined);
+		assert.deepEqual(first.editorCalls, [
+			{
+				title: "Amend Bash permission rule",
+				initialValue: "session-tool run first *",
+			},
+		]);
+		const repeated = await invoke(
+			"session-tool run second",
+			cwd,
+			[],
+			undefined,
+			handler,
+		);
+		assert.equal(repeated.result, undefined);
+		assert.deepEqual(repeated.selectCalls, []);
+		const denied = await invoke(
+			"session-tool other second",
+			cwd,
+			["No"],
+			undefined,
+			handler,
+		);
+		assert.deepEqual(denied.result, { block: true, reason: "Blocked by user" });
+		assert.equal(fs.existsSync(path.join(cwd, ".pi")), false);
+	});
+}
+
+for (const editedRule of [null, "", "   "]) {
+	test(`cancelling or emptying the session rule blocks approval (${JSON.stringify(editedRule)})`, async () => {
+		const cwd = createProject([]);
+		const handler = createHandler();
+		const first = await invoke(
+			"session-tool",
+			cwd,
+			["Allow for this session"],
+			editedRule,
+			handler,
+		);
+		assert.deepEqual(first.result, {
+			block: true,
+			reason: "Permission rule save cancelled",
+		});
+		const repeated = await invoke(
+			"session-tool",
+			cwd,
+			["No"],
+			undefined,
+			handler,
+		);
+		assert.deepEqual(repeated.result, {
+			block: true,
+			reason: "Blocked by user",
+		});
+		assert.equal(fs.existsSync(path.join(cwd, ".pi")), false);
+	});
+}
+
+test("broad session rules preserve deny rules, always-prompt commands, and syntax checks", async () => {
+	const cwd = createProject([]);
+	const handler = createHandler();
+	assert.equal(
+		(
+			await invoke(
+				"session-tool",
+				cwd,
+				["Allow for this session"],
+				"*",
+				handler,
+			)
+		).result,
+		undefined,
+	);
+	assert.equal(
+		(await invoke("other-tool", cwd, [], undefined, handler)).result,
+		undefined,
+	);
+	writePiPermissions(cwd, { deny: ["Bash(denied-tool)"] });
+	const denied = await invoke("denied-tool", cwd, [], undefined, handler);
+	assert.deepEqual(denied.result, {
+		block: true,
+		reason: 'Bash command matches deny rule "Bash(denied-tool)"',
+	});
+	for (const command of [
+		"git push",
+		"rm file",
+		"echo $(date)",
+		"session-tool > .hidden",
+	]) {
+		const blocked = await invoke(command, cwd, ["No"], undefined, handler);
+		assert.deepEqual(blocked.result, {
+			block: true,
+			reason: "Blocked by user",
+		});
+		assert.equal(blocked.selectCalls.length, 1);
+	}
+});
+
+test("session changes during rule editing discard the approval", async () => {
+	const cwd = createProject([]);
+	const handlers = createHandlers();
+	const handler = handlers.get("tool_call");
+	assert.ok(handler);
+	const result = await handler(
+		{ toolName: "bash", input: { command: "session-tool" } },
+		{
+			cwd,
+			hasUI: true,
+			ui: {
+				select: async () => "Allow for this session",
+				editor: async () => {
+					await handlers.get("session_shutdown")?.({ reason: "new" }, { cwd });
+					return "session-tool *";
+				},
+			},
+		},
+	);
+	assert.deepEqual(result, {
+		block: true,
+		reason: "Session changed during permission approval",
+	});
+	const repeated = await invoke(
+		"session-tool",
+		cwd,
+		["No"],
+		undefined,
+		handler,
+	);
+	assert.deepEqual(repeated.result, { block: true, reason: "Blocked by user" });
 });
 
 for (const eventName of ["session_start", "session_shutdown"]) {
