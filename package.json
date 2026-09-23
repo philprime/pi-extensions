@@ -36,10 +36,15 @@
       "./extensions/compaction-context.ts",
       "./extensions/footer.ts",
       "./extensions/permissions.ts",
-      "./extensions/run.ts"
+      "./extensions/run.ts",
+      "./extensions/tasks.ts"
     ],
     "skills": [
       "./skills"
     ]
+  },
+  "dependencies": {
+    "@earendil-works/pi-tui": "0.80.10",
+    "typebox": "1.1.38"
   }
 }
