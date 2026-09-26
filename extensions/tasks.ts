@@ -198,6 +198,71 @@ export default function tasksExtension(pi: ExtensionAPI): void {
 		return { messages };
 	});
 
+	pi.registerCommand("tasks", {
+		description: "Manage tasks: list, add <text>, remove <id>, or clear",
+		handler: async (args, ctx) => {
+			const [, action, value = ""] =
+				args.trim().match(/^(\S+)(?:\s+([\s\S]*))?$/) ?? [];
+			const notify = (message: string, type: "info" | "error" = "info") => {
+				if (ctx.hasUI) ctx.ui.notify(message, type);
+			};
+			switch (action) {
+				case "list":
+					if (!value) {
+						notify(displayText(formatList(list, false)));
+						return;
+					}
+					break;
+				case "add": {
+					if (!value || value.length > 160) {
+						notify("Usage: /tasks add <text> (1–160 characters)", "error");
+						return;
+					}
+					if (list && list.tasks.length >= 50) {
+						notify("A task list can contain at most 50 tasks.", "error");
+						return;
+					}
+					const id =
+						Math.max(0, ...(list?.tasks.map((task) => task.id) ?? [])) + 1;
+					save(
+						{
+							title: list?.title ?? "Tasks",
+							tasks: [
+								...(list?.tasks ?? []),
+								{ id, label: value, description: value, status: "pending" },
+							],
+						},
+						ctx,
+					);
+					notify(`Added task #${id}.`);
+					return;
+				}
+				case "remove": {
+					if (!/^[1-9]\d*$/.test(value)) {
+						notify("Usage: /tasks remove <id>", "error");
+						return;
+					}
+					const id = Number(value);
+					if (!list?.tasks.some((task) => task.id === id)) {
+						notify(`Task #${value} not found.`, "error");
+						return;
+					}
+					const tasks = list.tasks.filter((task) => task.id !== id);
+					save(tasks.length ? { ...list, tasks } : null, ctx);
+					notify(`Removed task #${id}.`);
+					return;
+				}
+				case "clear":
+					if (!value) {
+						save(null, ctx);
+						notify("Task list cleared.");
+						return;
+					}
+			}
+			notify("Usage: /tasks list | add <text> | remove <id> | clear", "error");
+		},
+	});
+
 	pi.registerTool({
 		name: "tasks",
 		label: "Tasks",

@@ -6,8 +6,10 @@ import {
 	type ContextEvent,
 	discoverAndLoadExtensions,
 	type ExtensionAPI,
+	type ExtensionCommandContext,
 	type ExtensionContext,
 	type ExtensionEvent,
+	type RegisteredCommand,
 	SessionManager,
 	type Theme,
 	type ToolDefinition,
@@ -31,6 +33,11 @@ const theme = {
 function createExtension(session = SessionManager.inMemory()) {
 	const handlers = new Map<string, Handler>();
 	const tools = new Map<string, ToolDefinition>();
+	const commands = new Map<
+		string,
+		Omit<RegisteredCommand, "name" | "sourceInfo">
+	>();
+	const notifications: string[] = [];
 	const widgets = new Map<string, Widget | string[] | undefined>();
 	const statuses = new Map<string, string | undefined>();
 	const ctx = {
@@ -38,6 +45,9 @@ function createExtension(session = SessionManager.inMemory()) {
 		hasUI: true,
 		sessionManager: session,
 		ui: {
+			notify(message: string) {
+				notifications.push(message);
+			},
 			setWidget(key: string, widget: Widget | string[] | undefined) {
 				widgets.set(key, widget);
 			},
@@ -49,6 +59,12 @@ function createExtension(session = SessionManager.inMemory()) {
 	const api = {
 		on(name: string, handler: Handler) {
 			handlers.set(name, handler);
+		},
+		registerCommand(
+			name: string,
+			command: Omit<RegisteredCommand, "name" | "sourceInfo">,
+		) {
+			commands.set(name, command);
 		},
 		registerTool(tool: ToolDefinition) {
 			tools.set(tool.name, tool);
@@ -67,6 +83,12 @@ function createExtension(session = SessionManager.inMemory()) {
 
 	return {
 		api,
+		notifications,
+		async command(args: string) {
+			const command = commands.get("tasks");
+			assert.ok(command, "must register /tasks");
+			await command.handler(args, ctx as ExtensionCommandContext);
+		},
 		ctx,
 		session,
 		statuses,
@@ -121,6 +143,108 @@ function text(result: Awaited<ReturnType<ToolDefinition["execute"]>>) {
 		.map((part) => part.text)
 		.join("\n");
 }
+
+test("/tasks list displays current tasks without saving changes", async () => {
+	const extension = createExtension();
+	await extension.command("list");
+	assert.equal(extension.notifications.at(-1), "No active task list.");
+	assert.equal(extension.session.getBranch().length, 0);
+	await extension.call(initialList);
+	await extension.call({ action: "update", id: 1, status: "in_progress" });
+	await extension.command("list");
+	assert.match(extension.notifications.at(-1) ?? "", /Repair authentication/);
+	assert.match(
+		extension.notifications.at(-1) ?? "",
+		/#1.*in_progress.*Investigate token expiry/,
+	);
+	assert.match(
+		extension.notifications.at(-1) ?? "",
+		/#2.*pending.*Fix and verify expiry/,
+	);
+	assert.equal(extension.session.getBranch().length, 2);
+});
+
+test("task commands add, remove, and clear durable tasks while preserving existing details", async () => {
+	const extension = createExtension();
+	await extension.command("add First task");
+	assert.match(
+		text(await extension.call({ action: "get" })),
+		/#1.*pending.*First task\nFirst task/,
+	);
+	await extension.call(initialList);
+	await extension.call({
+		action: "update",
+		id: 2,
+		notes: "Keep this",
+		status: "blocked",
+	});
+	await extension.command("remove 1");
+	await extension.command("add Verify the fix");
+	const result = text(await extension.call({ action: "get" }));
+	assert.doesNotMatch(result, /#1 /);
+	assert.match(result, /#2.*blocked/);
+	assert.ok(result.includes(initialList.tasks[1].description));
+	assert.match(result, /Keep this/);
+	assert.match(result, /#3.*pending.*Verify the fix/);
+	const restored = createExtension(extension.session);
+	await restored.emit({ type: "session_start", reason: "reload" });
+	assert.equal(text(await restored.call({ action: "get" })), result);
+	await restored.command("clear");
+	assert.match(
+		text(await restored.call({ action: "get" })),
+		/No active task list/,
+	);
+	assert.deepEqual(restored.renderWidget(), []);
+});
+
+for (const args of [
+	"",
+	"unknown",
+	"add",
+	"add   ",
+	`add ${"x".repeat(161)}`,
+	"remove",
+	"remove 0",
+	"remove 1x",
+	"remove 99",
+	"clear extra",
+	"list extra",
+]) {
+	test(`rejects invalid task command without saving: ${args}`, async () => {
+		const extension = createExtension();
+		await extension.call(initialList);
+		const before = text(await extension.call({ action: "get" }));
+		await extension.command(args);
+		assert.equal(text(await extension.call({ action: "get" })), before);
+		assert.equal(extension.session.getBranch().length, 1);
+		assert.equal(extension.notifications.length, 1);
+	});
+}
+
+test("task commands respect the list limit and work without UI", async () => {
+	const extension = createExtension();
+	extension.ctx.hasUI = false;
+	extension.ctx.ui = new Proxy({} as ExtensionContext["ui"], {
+		get() {
+			throw new Error("UI is unavailable");
+		},
+	});
+	await extension.command("add First task");
+	await extension.command("list");
+	await extension.command("remove 1");
+	assert.match(
+		text(await extension.call({ action: "get" })),
+		/No active task list/,
+	);
+	await extension.call({
+		...initialList,
+		tasks: Array.from({ length: 50 }, () => initialList.tasks[0]),
+	});
+	const before = extension.session.getBranch().length;
+	await extension.command("add Too many");
+	assert.equal(extension.session.getBranch().length, before);
+	await extension.command("clear");
+});
 
 test("creates a durable list with numbered pending tasks and readable descriptions", async () => {
 	const extension = createExtension();
