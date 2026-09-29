@@ -55,6 +55,7 @@ const DEFAULT_ALLOW_RULES: string[] = [
 	"git status:*",
 	"git log:*",
 	"git diff:*",
+	"git range-diff:*",
 	"git show:*",
 	"git blame:*",
 	"git grep:*",

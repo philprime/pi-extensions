@@ -1447,6 +1447,17 @@ test("auto-allows built-in read-only git without any project allow rule", async 
 	assert.deepEqual(selectCalls, []);
 });
 
+test("auto-allows git range-diff without a project rule", async () => {
+	const projectDirectory = createProject([]);
+	const { result, selectCalls } = await invoke(
+		"git range-diff main~2..main main~1..HEAD",
+		projectDirectory,
+	);
+
+	assert.equal(result, undefined);
+	assert.deepEqual(selectCalls, []);
+});
+
 test("auto-allows additional built-in low-risk commands", async () => {
 	const projectDirectory = createProject([]);
 	const commands = [
