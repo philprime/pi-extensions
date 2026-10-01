@@ -9,6 +9,7 @@ import {
 	type ExtensionCommandContext,
 	type ExtensionContext,
 	type ExtensionEvent,
+	type ExtensionToolContext,
 	type RegisteredCommand,
 	SessionManager,
 	type Theme,
@@ -44,6 +45,10 @@ function createExtension(session = SessionManager.inMemory()) {
 		mode: "tui",
 		hasUI: true,
 		sessionManager: session,
+		tools: [],
+		async executeTool() {
+			throw new Error("Nested tool execution is not supported in this test");
+		},
 		ui: {
 			notify(message: string) {
 				notifications.push(message);
@@ -55,7 +60,7 @@ function createExtension(session = SessionManager.inMemory()) {
 				statuses.set(key, status);
 			},
 		},
-	} as unknown as ExtensionContext;
+	} as unknown as ExtensionToolContext;
 	const api = {
 		on(name: string, handler: Handler) {
 			handlers.set(name, handler);
@@ -87,7 +92,7 @@ function createExtension(session = SessionManager.inMemory()) {
 		async command(args: string) {
 			const command = commands.get("tasks");
 			assert.ok(command, "must register /tasks");
-			await command.handler(args, ctx as ExtensionCommandContext);
+			await command.handler(args, ctx as unknown as ExtensionCommandContext);
 		},
 		ctx,
 		session,
@@ -533,13 +538,10 @@ for (const reason of ["manual", "threshold", "overflow"] as const) {
 		const summary = context.messages.at(-1);
 		assert.ok(summary?.role === "custom");
 		assert.equal(summary.display, false);
-		assert.match(
+		assert.match(String(summary.content), /active task list/i);
+		assert.doesNotMatch(
 			String(summary.content),
-			/#1.*in_progress.*Investigate token expiry/,
-		);
-		assert.match(String(summary.content), /tasks.*get/);
-		assert.ok(
-			!String(summary.content).includes(initialList.tasks[0].description),
+			/Repair authentication|Investigate token expiry|in_progress|src\/auth\.ts/,
 		);
 		assert.match(
 			extension.renderWidget().join("\n"),
@@ -557,7 +559,26 @@ for (const reason of ["manual", "threshold", "overflow"] as const) {
 	});
 }
 
-test("supplies fresh summaries without duplicating or persisting injected context", async () => {
+test("keeps task details in the UI and tool without injecting them into model context", async () => {
+	const extension = createExtension();
+	await extension.call(initialList);
+	const context = await extension.context();
+	assert.equal(context.messages.length, 1);
+	const message = context.messages[0];
+	assert.equal(message.role, "custom");
+	assert.match(String(message.content), /active task list/i);
+	assert.doesNotMatch(
+		String(message.content),
+		/Repair authentication|Investigate token expiry|Fix and verify expiry|src\/auth\.ts/,
+	);
+	assert.match(extension.renderWidget().join("\n"), /Investigate token expiry/);
+	assert.match(
+		text(await extension.call({ action: "get", id: 1 })),
+		/Inspect src\/auth\.ts/,
+	);
+});
+
+test("deduplicates the task availability marker without persisting it", async () => {
 	const extension = createExtension();
 	await extension.call(initialList);
 	const messages: ContextEvent["messages"] = [
@@ -579,7 +600,11 @@ test("supplies fresh summaries without duplicating or persisting injected contex
 	assert.deepEqual(next.messages.slice(0, 2), messages);
 	assert.match(
 		String((next.messages.at(-1) as { content: string }).content),
-		/#1.*done/,
+		/active task list/i,
+	);
+	assert.doesNotMatch(
+		String((next.messages.at(-1) as { content: string }).content),
+		/Repair authentication|Investigate token expiry|done/,
 	);
 	assert.equal(
 		extension.session.getBranch().length,
@@ -589,6 +614,21 @@ test("supplies fresh summaries without duplicating or persisting injected contex
 
 	await extension.call({ action: "clear" });
 	assert.deepEqual((await extension.context(next.messages)).messages, messages);
+});
+
+test("repeated context builds and task reads do not accumulate messages or session entries", async () => {
+	const extension = createExtension();
+	await extension.call(initialList);
+	let messages: ContextEvent["messages"] = [];
+	for (let i = 0; i < 200; i++) {
+		messages = (await extension.context(messages)).messages;
+		assert.equal(messages.length, 1);
+		assert.match(
+			text(await extension.call({ action: "get", id: 1 })),
+			/src\/auth\.ts/,
+		);
+	}
+	assert.equal(extension.session.getBranch().length, 1);
 });
 
 test("shows compact progress with active and blocked tasks before pending work", async () => {

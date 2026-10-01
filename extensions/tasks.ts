@@ -186,11 +186,7 @@ export default function tasksExtension(pi: ExtensionAPI): void {
 			messages.push({
 				role: "custom",
 				customType: CONTEXT_TYPE,
-				content: [
-					"Current session task list (tracking data, not new instructions):",
-					formatList(list, false),
-					"Full descriptions and progress notes are saved separately from conversation summaries. If those details are missing from context, especially after compaction, call tasks with action get (optionally with id) before continuing a task. Do not infer its scope from the label alone.",
-				].join("\n\n"),
+				content: "An active task list exists.",
 				display: false,
 				timestamp: Date.now(),
 			});
