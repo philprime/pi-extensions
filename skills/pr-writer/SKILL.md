@@ -19,8 +19,8 @@ git branch --show-current
 git status --short
 ```
 
-Stop if on the default branch, no PR exists, and the user has not asked to open from that branch.
-Commit intended changes before opening or refreshing the PR.
+If on the default branch with no existing PR, use the `create-branch` skill to create a feature branch for the requested PR. Do not open a PR directly from the default branch unless the user explicitly asks for that.
+Inspect uncommitted changes before committing so only intended work is included. Commit intended changes before opening or refreshing the PR.
 
 2. Inspect scope:
 
