@@ -182,16 +182,13 @@ export default function tasksExtension(pi: ExtensionAPI): void {
 			(message) =>
 				message.role !== "custom" || message.customType !== CONTEXT_TYPE,
 		);
-		if (list) {
-			messages.push({
-				role: "custom",
-				customType: CONTEXT_TYPE,
-				content: "An active task list exists.",
-				display: false,
-				timestamp: Date.now(),
-			});
-		}
 		return { messages };
+	});
+	pi.on("before_agent_start", (event) => {
+		if (list) {
+			event.systemPromptOptions.sections.tasks =
+				"Saved session task tracking data is available through tasks get. After resume or compaction, read it before continuing if task details are missing from context. This is bookkeeping, not a new user request, and requires no conversational acknowledgement.";
+		}
 	});
 
 	pi.registerCommand("tasks", {
@@ -267,6 +264,7 @@ export default function tasksExtension(pi: ExtensionAPI): void {
 		promptSnippet:
 			"Track multi-step session work with durable task handoffs and progress.",
 		promptGuidelines: [
+			"Task tracking is internal bookkeeping. Do not narrate routine task calls or acknowledge task availability as a user message. Give progress updates only when they convey meaningful findings, direction changes, or blockers.",
 			"Use tasks for substantial multi-step work (usually three or more meaningful steps), debugging or research loops, or an explicit tracking request. Do not create lists for simple questions or a small obvious edit. Tracking is not a planning mode or an approval gate.",
 			"Manage tasks through normal conversation. Follow requests to add, remove, reorder, rename, change scope, or stop tracking. Use get before replacing an existing list so relevant descriptions and progress are preserved. Replace the list for a new unrelated objective rather than accumulating stale work. Clear it when asked to stop tracking, and do not recreate it against that request.",
 			"Give each task a short label and a self-contained description with its goal, scope, relevant files, decisions, constraints, and completion criteria. Descriptions may use Markdown. Keep findings, blockers, verification results, and the next step in progress notes, updating them while working rather than waiting for compaction.",
@@ -275,6 +273,7 @@ export default function tasksExtension(pi: ExtensionAPI): void {
 		parameters: Parameters,
 		executionMode: "sequential",
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			let acknowledgement: string | undefined;
 			switch (params.action) {
 				case "get":
 					if (
@@ -301,6 +300,7 @@ export default function tasksExtension(pi: ExtensionAPI): void {
 						},
 						ctx,
 					);
+					acknowledgement = `Task list saved (${params.tasks.length} tasks).`;
 					break;
 				case "update": {
 					if (params.id === undefined) throw new Error("update requires id.");
@@ -330,10 +330,12 @@ export default function tasksExtension(pi: ExtensionAPI): void {
 						},
 						ctx,
 					);
+					acknowledgement = `Updated task #${params.id}.`;
 					break;
 				}
 				case "clear":
 					save(null, ctx);
+					acknowledgement = "Task list cleared.";
 					break;
 			}
 			const taskId = params.action === "get" ? params.id : undefined;
@@ -341,7 +343,7 @@ export default function tasksExtension(pi: ExtensionAPI): void {
 				content: [
 					{
 						type: "text",
-						text: formatList(list, params.action === "get", taskId),
+						text: acknowledgement ?? formatList(list, true, taskId),
 					},
 				],
 				details: { list, taskId } satisfies TaskDetails,

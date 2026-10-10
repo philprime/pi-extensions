@@ -3,6 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
+	type BeforeAgentStartEvent,
 	type ContextEvent,
 	discoverAndLoadExtensions,
 	type ExtensionAPI,
@@ -106,10 +107,30 @@ function createExtension(session = SessionManager.inMemory()) {
 		},
 		async context(messages: ContextEvent["messages"] = []) {
 			const handler = handlers.get("context");
-			assert.ok(handler, "must supply the current task summary to model calls");
+			assert.ok(handler, "must remove legacy task reminders from model calls");
 			return (await handler({ type: "context", messages }, ctx)) as {
 				messages: ContextEvent["messages"];
 			};
+		},
+		async startAgent() {
+			const event: BeforeAgentStartEvent = {
+				type: "before_agent_start",
+				prompt: "Continue",
+				systemPrompt: "Existing instructions",
+				systemPromptOptions: {
+					cwd: process.cwd(),
+					selectedTools: ["tasks"],
+					toolSnippets: {},
+					toolGuidelines: {},
+					promptGuidelines: [],
+					appendSystemPrompt: "",
+					sections: { other: "Existing section" },
+					contextFiles: [],
+					skills: [],
+				},
+			};
+			await this.emit(event);
+			return event.systemPromptOptions.sections;
 		},
 		async call(input: unknown) {
 			const registered = tool();
@@ -535,12 +556,11 @@ for (const reason of ["manual", "threshold", "overflow"] as const) {
 			!JSON.stringify(compacted).includes(initialList.tasks[0].description),
 		);
 		const context = await extension.context(compacted);
-		const summary = context.messages.at(-1);
-		assert.ok(summary?.role === "custom");
-		assert.equal(summary.display, false);
-		assert.match(String(summary.content), /active task list/i);
+		assert.deepEqual(context.messages, compacted);
+		const sections = await extension.startAgent();
+		assert.match(sections.tasks, /tasks get/i);
 		assert.doesNotMatch(
-			String(summary.content),
+			sections.tasks,
 			/Repair authentication|Investigate token expiry|in_progress|src\/auth\.ts/,
 		);
 		assert.match(
@@ -563,14 +583,7 @@ test("keeps task details in the UI and tool without injecting them into model co
 	const extension = createExtension();
 	await extension.call(initialList);
 	const context = await extension.context();
-	assert.equal(context.messages.length, 1);
-	const message = context.messages[0];
-	assert.equal(message.role, "custom");
-	assert.match(String(message.content), /active task list/i);
-	assert.doesNotMatch(
-		String(message.content),
-		/Repair authentication|Investigate token expiry|Fix and verify expiry|src\/auth\.ts/,
-	);
+	assert.deepEqual(context.messages, []);
 	assert.match(extension.renderWidget().join("\n"), /Investigate token expiry/);
 	assert.match(
 		text(await extension.call({ action: "get", id: 1 })),
@@ -578,7 +591,7 @@ test("keeps task details in the UI and tool without injecting them into model co
 	);
 });
 
-test("deduplicates the task availability marker without persisting it", async () => {
+test("removes legacy task reminders without changing other messages or persisting context", async () => {
 	const extension = createExtension();
 	await extension.call(initialList);
 	const messages: ContextEvent["messages"] = [
@@ -591,21 +604,22 @@ test("deduplicates the task availability marker without persisting it", async ()
 			timestamp: 2,
 		},
 	];
-	const first = await extension.context(messages);
-	assert.equal(messages.length, 2, "must not mutate incoming context");
-	assert.equal(first.messages.length, 3);
+	const legacyMessages: ContextEvent["messages"] = [
+		...messages,
+		{
+			role: "custom",
+			customType: "task-list-context",
+			content: "An active task list exists.",
+			display: false,
+			timestamp: 3,
+		},
+	];
+	const first = await extension.context(legacyMessages);
+	assert.equal(legacyMessages.length, 3, "must not mutate incoming context");
+	assert.deepEqual(first.messages, messages);
 	await extension.call({ action: "update", id: 1, status: "done" });
 	const next = await extension.context(first.messages);
-	assert.equal(next.messages.length, 3);
-	assert.deepEqual(next.messages.slice(0, 2), messages);
-	assert.match(
-		String((next.messages.at(-1) as { content: string }).content),
-		/active task list/i,
-	);
-	assert.doesNotMatch(
-		String((next.messages.at(-1) as { content: string }).content),
-		/Repair authentication|Investigate token expiry|done/,
-	);
+	assert.deepEqual(next.messages, messages);
 	assert.equal(
 		extension.session.getBranch().length,
 		2,
@@ -622,13 +636,65 @@ test("repeated context builds and task reads do not accumulate messages or sessi
 	let messages: ContextEvent["messages"] = [];
 	for (let i = 0; i < 200; i++) {
 		messages = (await extension.context(messages)).messages;
-		assert.equal(messages.length, 1);
+		assert.equal(messages.length, 0);
 		assert.match(
 			text(await extension.call({ action: "get", id: 1 })),
 			/src\/auth\.ts/,
 		);
 	}
 	assert.equal(extension.session.getBranch().length, 1);
+});
+
+test("adds task recovery guidance to the system prompt after resume without user messages", async () => {
+	const original = createExtension();
+	await original.call(initialList);
+	const restored = createExtension(original.session);
+	await restored.emit({ type: "session_start", reason: "resume" });
+
+	const sections = await restored.startAgent();
+	assert.equal(sections.other, "Existing section");
+	assert.match(sections.tasks, /tasks get/i);
+	assert.match(sections.tasks, /compaction|resume/i);
+	assert.deepEqual((await restored.context()).messages, []);
+	assert.equal(restored.session.getBranch().length, 1);
+
+	await restored.call({ action: "clear" });
+	assert.deepEqual(await restored.startAgent(), { other: "Existing section" });
+});
+
+test("does not add recovery guidance when no task list exists", async () => {
+	const extension = createExtension();
+	assert.deepEqual(await extension.startAgent(), { other: "Existing section" });
+});
+
+test("mutation results acknowledge changes without repeating the task list", async () => {
+	const extension = createExtension();
+	const set = await extension.call(initialList);
+	assert.equal(text(set), "Task list saved (2 tasks).");
+	const update = await extension.call({
+		action: "update",
+		id: 1,
+		status: "in_progress",
+		notes: "Next: reproduce token expiry.",
+	});
+	assert.equal(text(update), "Updated task #1.");
+	assert.match(
+		text(await extension.call({ action: "get", id: 1 })),
+		/Next: reproduce token expiry/,
+	);
+	const render = extension.tool().renderResult;
+	assert.ok(render);
+	assert.match(
+		render(update, { expanded: false, isPartial: false }, theme, {} as never)
+			.render(200)
+			.join("\n"),
+		/Investigate token expiry/,
+	);
+	assert.match(extension.renderWidget().join("\n"), /Investigate token expiry/);
+	assert.equal(
+		text(await extension.call({ action: "clear" })),
+		"Task list cleared.",
+	);
 });
 
 test("shows compact progress with active and blocked tasks before pending work", async () => {
@@ -695,7 +761,7 @@ for (const mode of ["print", "json", "rpc"] as const) {
 		await extension.call(initialList);
 		await extension.call({ action: "update", id: 1, status: "done" });
 		assert.match(text(await extension.call({ action: "get" })), /#1.*done/);
-		assert.equal((await extension.context()).messages.length, 1);
+		assert.equal((await extension.context()).messages.length, 0);
 		await extension.call({ action: "clear" });
 	});
 }
