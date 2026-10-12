@@ -51,7 +51,14 @@ const DEFAULT_ALLOW_RULES: string[] = [
 	"uname:*",
 	"base64:*",
 	"shasum:*",
+	// Read-only Simulator inspection
+	"xcrun simctl appinfo:*",
+	"xcrun simctl get_app_container:*",
+	"xcrun simctl getenv:*",
+	"xcrun simctl help:*",
 	"xcrun simctl list:*",
+	"xcrun simctl listapps:*",
+	"xcrun simctl pbpaste:*",
 	// Read-only git inspection
 	"git status:*",
 	"git log:*",
@@ -712,6 +719,43 @@ function isBlockedCommand(command: string): boolean {
 	return false;
 }
 
+// Match device-dependent operations by word position. A glob for the device
+// could also consume a mutating operation and mistake its argument for a query.
+function isReadOnlySimctlCommand(command: string): boolean {
+	const words = shellWords(command).map((word) =>
+		word.replace(/^("|')|("|')$/g, ""),
+	);
+	if (words[0] !== "xcrun" || words[1] !== "simctl") return false;
+
+	switch (words[2]) {
+		case "io":
+			return (
+				(words.length === 5 && ["enumerate", "poll"].includes(words[4])) ||
+				(words.length === 6 &&
+					words[4] === "enumerate" &&
+					words[5] === "--poll")
+			);
+		case "location":
+			return words.length === 5 && words[4] === "list";
+		case "ui":
+			return (
+				words.length === 5 &&
+				["appearance", "increase_contrast", "content_size"].includes(words[4])
+			);
+		case "runtime": {
+			const listIndex = words[3] === "match" ? 4 : 3;
+			return (
+				words[listIndex] === "list" &&
+				words
+					.slice(listIndex + 1)
+					.every((word) => ["-v", "-j", "--json"].includes(word))
+			);
+		}
+		default:
+			return false;
+	}
+}
+
 function isAllowedSimpleCommand(
 	command: string,
 	rules: string[],
@@ -722,9 +766,10 @@ function isAllowedSimpleCommand(
 	return (
 		parsed !== undefined &&
 		!isBlockedCommand(parsed.command) &&
-		[...rules, ...sessionRules].some((rule) =>
-			commandMatchesRule(parsed.command, rule),
-		)
+		(isReadOnlySimctlCommand(parsed.command) ||
+			[...rules, ...sessionRules].some((rule) =>
+				commandMatchesRule(parsed.command, rule),
+			))
 	);
 }
 

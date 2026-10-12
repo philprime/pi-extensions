@@ -1481,15 +1481,67 @@ test("auto-allows simulator listing without a project rule", async () => {
 	}
 });
 
-test("keeps other simulator commands behind approval", async () => {
+test("auto-allows read-only simulator subcommands without a project rule", async () => {
 	const projectDirectory = createProject([]);
-	const { result, selectCalls } = await invoke(
-		"xcrun simctl boot device-id",
-		projectDirectory,
-	);
+	const commands = [
+		"xcrun simctl appinfo booted com.example.app",
+		"xcrun simctl get_app_container device-id com.example.app data",
+		"xcrun simctl getenv booted HOME",
+		"xcrun simctl help",
+		"xcrun simctl help erase",
+		"xcrun simctl listapps booted",
+		"xcrun simctl pbpaste booted",
+		"xcrun simctl pbpaste -v device-id",
+		"xcrun simctl io device-id enumerate",
+		"xcrun simctl io booted enumerate --poll",
+		"xcrun simctl io booted poll",
+		"xcrun simctl location device-id list",
+		"xcrun simctl runtime list",
+		"xcrun simctl runtime list -v --json",
+		"xcrun simctl runtime match list -j",
+		"xcrun simctl ui device-id appearance",
+		"xcrun simctl ui booted increase_contrast",
+		"xcrun simctl ui booted content_size",
+	];
 
-	assert.deepEqual(result, { block: true, reason: "Blocked by user" });
-	assert.equal(selectCalls.length, 1);
+	for (const command of commands) {
+		const { result, selectCalls } = await invoke(command, projectDirectory);
+		assert.equal(result, undefined, command);
+		assert.deepEqual(selectCalls, [], command);
+	}
+});
+
+test("keeps mutating and file-writing simulator commands behind approval", async () => {
+	const projectDirectory = createProject([]);
+	const commands = [
+		"xcrun simctl boot device-id",
+		"xcrun simctl erase all",
+		"xcrun simctl spawn booted rm -rf /tmp/data",
+		"xcrun simctl diagnose --output /tmp/diagnostics",
+		"xcrun simctl io booted screenshot enumerate",
+		"xcrun simctl io booted recordVideo poll",
+		"xcrun simctl io booted screenConfig power off",
+		"xcrun simctl location booted set 0,0",
+		"xcrun simctl runtime delete all",
+		"xcrun simctl runtime match set sdk build",
+		"xcrun simctl runtime list --json-output=/tmp/runtimes.json",
+		"xcrun simctl runtime match list --json-output /tmp/runtimes.json",
+		"xcrun simctl ui booted appearance dark",
+		"xcrun simctl ui booted increase_contrast enabled",
+		"xcrun simctl ui booted content_size increment",
+		"xcrun simctl ui booted appearance dark appearance",
+		"xcrun simctl listapps booted && xcrun simctl erase all",
+	];
+
+	for (const command of commands) {
+		const { result, selectCalls } = await invoke(command, projectDirectory);
+		assert.deepEqual(
+			result,
+			{ block: true, reason: "Blocked by user" },
+			command,
+		);
+		assert.equal(selectCalls.length, 1, command);
+	}
 });
 
 test("auto-allows additional built-in low-risk commands", async () => {
