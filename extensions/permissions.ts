@@ -51,6 +51,7 @@ const DEFAULT_ALLOW_RULES: string[] = [
 	"uname:*",
 	"base64:*",
 	"shasum:*",
+	"xcrun simctl list:*",
 	// Read-only git inspection
 	"git status:*",
 	"git log:*",
@@ -103,6 +104,7 @@ const DEFAULT_ALLOW_RULES: string[] = [
 	"sentry --version",
 	"sentry * --help",
 	"sentry help:*",
+	"sentry docs:*",
 	"sentry auth status:*",
 	"sentry auth whoami:*",
 	"sentry cli defaults",

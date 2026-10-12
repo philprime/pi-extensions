@@ -1458,6 +1458,40 @@ test("auto-allows git range-diff without a project rule", async () => {
 	assert.deepEqual(selectCalls, []);
 });
 
+test("auto-allows Sentry docs without a project rule", async () => {
+	const projectDirectory = createProject([]);
+
+	for (const command of ["sentry docs search tracing", "sentry docs --help"]) {
+		const { result, selectCalls } = await invoke(command, projectDirectory);
+		assert.equal(result, undefined, command);
+		assert.deepEqual(selectCalls, [], command);
+	}
+});
+
+test("auto-allows simulator listing without a project rule", async () => {
+	const projectDirectory = createProject([]);
+
+	for (const command of [
+		"xcrun simctl list devices",
+		"xcrun simctl list --json",
+	]) {
+		const { result, selectCalls } = await invoke(command, projectDirectory);
+		assert.equal(result, undefined, command);
+		assert.deepEqual(selectCalls, [], command);
+	}
+});
+
+test("keeps other simulator commands behind approval", async () => {
+	const projectDirectory = createProject([]);
+	const { result, selectCalls } = await invoke(
+		"xcrun simctl boot device-id",
+		projectDirectory,
+	);
+
+	assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+	assert.equal(selectCalls.length, 1);
+});
+
 test("auto-allows additional built-in low-risk commands", async () => {
 	const projectDirectory = createProject([]);
 	const commands = [
