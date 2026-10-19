@@ -756,6 +756,17 @@ function isReadOnlySimctlCommand(command: string): boolean {
 	}
 }
 
+// Match the directory as one word so it cannot consume another subcommand.
+function isReadOnlyGitDirectoryCommand(command: string): boolean {
+	const words = shellWords(command);
+	return (
+		words[0] === "git" &&
+		words[1] === "-C" &&
+		["diff", "log", "status"].includes(words[3]) &&
+		!words.slice(0, 4).some((word) => word.includes("\\"))
+	);
+}
+
 function isAllowedSimpleCommand(
 	command: string,
 	rules: string[],
@@ -767,6 +778,7 @@ function isAllowedSimpleCommand(
 		parsed !== undefined &&
 		!isBlockedCommand(parsed.command) &&
 		(isReadOnlySimctlCommand(parsed.command) ||
+			isReadOnlyGitDirectoryCommand(parsed.command) ||
 			[...rules, ...sessionRules].some((rule) =>
 				commandMatchesRule(parsed.command, rule),
 			))

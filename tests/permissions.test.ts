@@ -1447,6 +1447,37 @@ test("auto-allows built-in read-only git without any project allow rule", async 
 	assert.deepEqual(selectCalls, []);
 });
 
+for (const command of [
+	"git -C repository diff",
+	"git -C /tmp/repository diff --stat",
+	"git -C repository log",
+	"git -C 'repository with spaces' log --oneline -5",
+	"git -C repository status",
+	'git -C "repository with spaces" status --short',
+]) {
+	test(`auto-allows ${command} without a project rule`, async () => {
+		const { result, selectCalls } = await invoke(command, createProject([]));
+		assert.equal(result, undefined);
+		assert.deepEqual(selectCalls, []);
+	});
+}
+
+for (const command of [
+	"git -C repository checkout diff",
+	"git -C repository switch log",
+	"git -C repository branch status",
+	"git -C repository -c core.pager=custom log",
+	"git -C repository push origin main",
+	"git -C repository\\ diff checkout",
+	"git -C repository diff && custom-tool run",
+]) {
+	test(`keeps ${command} behind approval`, async () => {
+		const { result, selectCalls } = await invoke(command, createProject([]));
+		assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+		assert.equal(selectCalls.length, 1);
+	});
+}
+
 test("auto-allows git range-diff without a project rule", async () => {
 	const projectDirectory = createProject([]);
 	const { result, selectCalls } = await invoke(
