@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, test, vi } from "vitest";
 import permissionsExtension from "../extensions/permissions.ts";
 
 type ToolCallHandler = (
@@ -1434,6 +1434,89 @@ test("auto-allows a built-in safe command without any project allow rule", async
 
 	assert.equal(result, undefined);
 	assert.deepEqual(selectCalls, []);
+});
+
+describe("macOS default inspection permissions", () => {
+	beforeEach(() => {
+		vi.stubEnv("HOME", createEmptyProject());
+	});
+	afterEach(() => {
+		vi.unstubAllEnvs();
+	});
+
+	for (const command of [
+		"col -b",
+		"colrm 1 4",
+		"column -t report.txt",
+		"expand -t 4 source.txt",
+		"unexpand -a source.txt",
+		"fold -w 100 source.txt",
+		"paste first.txt second.txt",
+		"join first.txt second.txt",
+		"rev source.txt",
+		"readlink -f link",
+		"du -sh Sources",
+		"df -h",
+		"cksum archive.zip",
+		"sum archive.zip",
+		"sw_vers -productVersion",
+		"getconf ARG_MAX",
+		"pagesize",
+		"uptime",
+		"vm_stat",
+		"id -u",
+		"groups",
+		"whoami",
+		"uuidgen",
+		"size AppBinary",
+		"arch",
+		"ps",
+		"ps aux",
+		"ps -ef",
+		"ps -p 123,456 -o pid,ppid,comm",
+		"lipo -info AppBinary",
+		"lipo -archs 'App Binary'",
+		"lipo -detailed_info AppBinary",
+		"plutil -p Info.plist",
+		"plutil -lint -- Info.plist Other.plist",
+		"ps aux | col -b | column -t",
+	]) {
+		test(`auto-allows low-risk macOS inspection: ${command}`, async () => {
+			const { result, selectCalls } = await invoke(command, createProject([]));
+			assert.equal(result, undefined);
+			assert.deepEqual(selectCalls, []);
+		});
+	}
+
+	for (const command of [
+		"arch -arm64 custom-tool",
+		"arch custom-tool",
+		"ps -E",
+		"ps auxE",
+		"ps e",
+		"ps -o pid -E",
+		"ps -p $PROCESS_OPTIONS",
+		"lipo -create AppBinary -output CombinedBinary",
+		"lipo -info AppBinary -create -output CombinedBinary",
+		"lipo -archs $LIPO_OPTIONS",
+		"lipo -info *",
+		"lipo -info -'create' AppBinary",
+		"plutil -convert json Info.plist",
+		"plutil -p Info.plist -convert json",
+		"plutil -lint Info.plist -remove key",
+		"plutil -p $PLUTIL_OPTIONS",
+		"plutil -p *",
+		"plutil -p -'convert' json Info.plist",
+		"man ps",
+		"man -P custom-tool ps",
+		"ps aux | custom-tool",
+	]) {
+		test(`keeps unsafe or uncontrolled inspection behind approval: ${command}`, async () => {
+			const { result, selectCalls } = await invoke(command, createProject([]));
+			assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+			assert.equal(selectCalls.length, 1);
+		});
+	}
 });
 
 test("auto-allows built-in read-only git without any project allow rule", async () => {

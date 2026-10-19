@@ -25,6 +25,10 @@ const DEFAULT_ALLOW_RULES: string[] = [
 	"realpath:*",
 	"basename:*",
 	"dirname:*",
+	"readlink:*",
+	"du:*",
+	"df:*",
+	"size:*",
 	// Search and text processing
 	"rg:*",
 	"grep:*",
@@ -40,6 +44,15 @@ const DEFAULT_ALLOW_RULES: string[] = [
 	"jq:*",
 	"yq:*",
 	"xargs:*",
+	"col:*",
+	"colrm:*",
+	"column:*",
+	"expand:*",
+	"unexpand:*",
+	"fold:*",
+	"paste:*",
+	"join:*",
+	"rev:*",
 	// Miscellaneous low-risk utilities
 	"date:*",
 	"echo:*",
@@ -51,6 +64,19 @@ const DEFAULT_ALLOW_RULES: string[] = [
 	"uname:*",
 	"base64:*",
 	"shasum:*",
+	"cksum:*",
+	"sum:*",
+	"sw_vers:*",
+	"getconf:*",
+	"pagesize",
+	"uptime:*",
+	"vm_stat:*",
+	"id:*",
+	"groups:*",
+	"whoami",
+	"uuidgen:*",
+	// With arguments, arch can execute another program.
+	"arch",
 	// Read-only Simulator inspection
 	"xcrun simctl appinfo:*",
 	"xcrun simctl get_app_container:*",
@@ -767,6 +793,65 @@ function isReadOnlyGitDirectoryCommand(command: string): boolean {
 	);
 }
 
+// Mixed-purpose utilities need argument checks rather than prefix rules.
+function isReadOnlyMacOSCommand(command: string): boolean {
+	const words = shellWords(command).map((word) =>
+		word.replace(/^("|')|("|')$/g, ""),
+	);
+	if (words.some((word) => /[$`\\\\"'*?[\]{}~]/.test(word))) return false;
+	const [name, operation, ...arguments_] = words;
+
+	if (name === "lipo" || name === "plutil") {
+		const operations =
+			name === "lipo" ? ["-info", "-archs", "-detailed_info"] : ["-p", "-lint"];
+		if (!operations.includes(operation)) return false;
+		if (name === "plutil" && arguments_[0] === "--") {
+			return arguments_.length > 1;
+		}
+		return (
+			arguments_.length > 0 &&
+			arguments_.every((word) => word.length > 0 && !word.startsWith("-"))
+		);
+	}
+
+	if (name !== "ps") return false;
+	for (let index = 1; index < words.length; index++) {
+		const word = words[index];
+		if (word === "-p") {
+			if (!/^\d+(,\d+)*$/.test(words[++index] ?? "")) return false;
+		} else if (word === "-o" || word === "-O") {
+			const fields = (words[++index] ?? "").split(",");
+			if (
+				!fields.every((field) =>
+					[
+						"pid",
+						"ppid",
+						"pgid",
+						"uid",
+						"user",
+						"comm",
+						"command",
+						"args",
+						"%cpu",
+						"%mem",
+						"state",
+						"etime",
+						"time",
+						"tty",
+					].includes(field),
+				)
+			)
+				return false;
+		} else if (
+			!/^-[AaCcdefhjlMmrSTvwXx]+$/.test(word) &&
+			!/^[acflmrSuvwx]+$/.test(word)
+		) {
+			return false;
+		}
+	}
+	return true;
+}
+
 function isAllowedSimpleCommand(
 	command: string,
 	rules: string[],
@@ -777,7 +862,8 @@ function isAllowedSimpleCommand(
 	return (
 		parsed !== undefined &&
 		!isBlockedCommand(parsed.command) &&
-		(isReadOnlySimctlCommand(parsed.command) ||
+		(isReadOnlyMacOSCommand(parsed.command) ||
+			isReadOnlySimctlCommand(parsed.command) ||
 			isReadOnlyGitDirectoryCommand(parsed.command) ||
 			[...rules, ...sessionRules].some((rule) =>
 				commandMatchesRule(parsed.command, rule),
