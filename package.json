@@ -41,7 +41,8 @@
       "./extensions/footer.ts",
       "./extensions/permissions.ts",
       "./extensions/run.ts",
-      "./extensions/tasks.ts"
+      "./extensions/tasks.ts",
+      "./extensions/web.ts"
     ],
     "skills": [
       "./skills"
