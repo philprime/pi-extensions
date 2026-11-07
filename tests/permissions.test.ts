@@ -1050,6 +1050,17 @@ test("allows a pipeline with backslashes in a single-quoted search pattern", asy
 	assert.deepEqual(selectCalls, []);
 });
 
+test("allows a pipeline with regex syntax inside a single-quoted pattern", async () => {
+	const projectDirectory = createProject([]);
+	const { result, selectCalls } = await invoke(
+		"rg -n '^#include|^static .*\\{|^void .*\\{|^return |^typedef ' Targets/HALPlugin/Sources --glob '*.{c,h}' | head -95",
+		projectDirectory,
+	);
+
+	assert.equal(result, undefined);
+	assert.deepEqual(selectCalls, []);
+});
+
 test("prompts for each unallowlisted command in a pipeline and offers an amend option", async () => {
 	const projectDirectory = createProject([]);
 	const { result, selectCalls } = await invoke(
@@ -1644,6 +1655,40 @@ describe("macOS default inspection permissions", () => {
 			assert.deepEqual(result, { block: true, reason: "Blocked by user" });
 			assert.equal(selectCalls.length, 1);
 		});
+	}
+});
+
+test("auto-allows listing local and remote branches with a pattern", async () => {
+	const projectDirectory = createProject([]);
+	const { result, selectCalls } = await invoke(
+		"git branch -a --list '*permission*'",
+		projectDirectory,
+	);
+
+	assert.equal(result, undefined);
+	assert.deepEqual(selectCalls, []);
+});
+
+test("auto-allows inspecting the GitHub login", async () => {
+	const projectDirectory = createProject([]);
+	const { result, selectCalls } = await invoke(
+		"gh api user --jq '.login'",
+		projectDirectory,
+	);
+
+	assert.equal(result, undefined);
+	assert.deepEqual(selectCalls, []);
+});
+
+test("keeps modified branch and API inspection commands behind approval", async () => {
+	const projectDirectory = createProject([]);
+	for (const command of [
+		"git branch -a --list '*permission*' -d topic",
+		"gh api user --jq '.login' -X PATCH",
+	]) {
+		const { result, selectCalls } = await invoke(command, projectDirectory);
+		assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+		assert.equal(selectCalls.length, 1);
 	}
 });
 

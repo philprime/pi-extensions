@@ -104,6 +104,7 @@ const DEFAULT_ALLOW_RULES: string[] = [
 	"git reflog show:*",
 	"git reflog list:*",
 	"git branch --list:*",
+	"git branch -a --list:*",
 	"git branch --show-current:*",
 	"git branch -vv:*",
 	"git tag --list:*",
@@ -115,6 +116,7 @@ const DEFAULT_ALLOW_RULES: string[] = [
 	"git config --get:*",
 	"git config --list:*",
 	// Read-only GitHub CLI inspection
+	"gh api user --jq '.login'",
 	"gh pr view:*",
 	"gh pr list:*",
 	"gh pr diff:*",
