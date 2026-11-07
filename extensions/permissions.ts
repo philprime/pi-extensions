@@ -116,7 +116,22 @@ const DEFAULT_ALLOW_RULES: string[] = [
 	"git config --get:*",
 	"git config --list:*",
 	// Read-only GitHub CLI inspection
+	"gh --help",
+	"gh help:*",
 	"gh api user --jq '.login'",
+	"gh gist list:*",
+	"gh gist view:*",
+	"gh org list:*",
+	"gh project field-list:*",
+	"gh project item-list:*",
+	"gh project list:*",
+	"gh project view:*",
+	"gh workflow list:*",
+	"gh workflow view:*",
+	"gh ruleset check:*",
+	"gh ruleset list:*",
+	"gh ruleset view:*",
+	"gh cache list:*",
 	"gh pr view:*",
 	"gh pr list:*",
 	"gh pr diff:*",
@@ -141,6 +156,21 @@ const DEFAULT_ALLOW_RULES: string[] = [
 	"sentry docs:*",
 	"sentry auth status:*",
 	"sentry auth whoami:*",
+	"sentry agent-conversation list:*",
+	"sentry agent-conversation view:*",
+	"sentry alert issues list:*",
+	"sentry alert issues view:*",
+	"sentry alert metrics list:*",
+	"sentry alert metrics view:*",
+	"sentry debug-files check:*",
+	"sentry debug-files find:*",
+	"sentry debug-files print-sources:*",
+	"sentry feedback list:*",
+	"sentry feedback view:*",
+	"sentry monitor list:*",
+	"sentry platform list:*",
+	"sentry sourcemap resolve:*",
+	"sentry status show:*",
 	"sentry cli defaults",
 	"sentry cli fix --dry-run",
 	"sentry cli import --dry-run",
@@ -694,30 +724,97 @@ function gitSubcommand(words: string[]): string | undefined {
 	return undefined;
 }
 
+function isReadOnlyGhHelpCommand(words: string[]): boolean {
+	return (
+		words[0] === "gh" &&
+		words.length >= 3 &&
+		words.length <= 4 &&
+		words[words.length - 1] === "--help" &&
+		[
+			"api",
+			"auth",
+			"cache",
+			"gist",
+			"issue",
+			"label",
+			"org",
+			"pr",
+			"project",
+			"release",
+			"repo",
+			"ruleset",
+			"run",
+			"search",
+			"status",
+			"workflow",
+		].includes(words[1]) &&
+		words.slice(1, -1).every((word) => /^[a-z][a-z-]*$/.test(word))
+	);
+}
+
+function isReadOnlyApiHelpCommand(words: string[]): boolean {
+	return (
+		(words[0] === "gh" || words[0] === "sentry") &&
+		words[1] === "api" &&
+		(words.length === 3 || (words.length === 4 && !words[2].startsWith("-"))) &&
+		words[words.length - 1] === "--help"
+	);
+}
+
+function isReadOnlyApiCommand(words: string[]): boolean {
+	const cli = words[0];
+	if ((cli !== "gh" && cli !== "sentry") || words[1] !== "api") return false;
+
+	let endpoint: string | undefined;
+	for (let index = 2; index < words.length; index++) {
+		const word = words[index];
+		if (word === "--method" || word === "-X") {
+			if (words[++index]?.toUpperCase() !== "GET") return false;
+			continue;
+		}
+		if (
+			(cli === "gh" && (word === "--jq" || word === "-q")) ||
+			(cli === "sentry" && word === "--fields")
+		) {
+			const value = words[++index];
+			if (!value || value.startsWith("-")) return false;
+			continue;
+		}
+		if (
+			(cli === "gh" &&
+				["--paginate", "--slurp", "--silent", "--include"].includes(word)) ||
+			(cli === "sentry" && ["--json", "--silent"].includes(word))
+		)
+			continue;
+		if (word.startsWith("-") || endpoint !== undefined) return false;
+		endpoint = word;
+	}
+
+	return (
+		endpoint !== undefined &&
+		!/^\/?graphql(?:[?#]|$)/i.test(endpoint) &&
+		!/^https?:\/\//i.test(endpoint)
+	);
+}
+
+function isReadOnlyCliCommand(command: string): boolean {
+	const words = shellWords(command).map((word) =>
+		word.replace(/^("|')|("|')$/g, ""),
+	);
+	return (
+		isReadOnlyGhHelpCommand(words) ||
+		isReadOnlyApiHelpCommand(words) ||
+		isReadOnlyApiCommand(words)
+	);
+}
+
 function isBlockedGhCommand(words: string[]): boolean {
+	if (isReadOnlyGhHelpCommand(words) || isReadOnlyApiHelpCommand(words))
+		return false;
 	const resource = words[1];
 	if (resource === undefined || resource.startsWith("-")) return false;
 
-	// `gh api` can mutate through a non-GET method or field flags.
-	if (resource === "api") {
-		for (let index = 2; index < words.length; index++) {
-			const word = words[index];
-			if (word === "-X" || word === "--method") {
-				const method = (words[index + 1] ?? "").toUpperCase();
-				if (method && method !== "GET") return true;
-				index++;
-				continue;
-			}
-			if (
-				word === "-f" ||
-				word === "-F" ||
-				word === "--field" ||
-				word === "--raw-field"
-			)
-				return true;
-		}
-		return false;
-	}
+	if (resource === "api") return !isReadOnlyApiCommand(words);
 
 	const action = words[2];
 	if (action === undefined || action.startsWith("-")) return false;
@@ -725,6 +822,9 @@ function isBlockedGhCommand(words: string[]): boolean {
 }
 
 function isBlockedSentryCommand(words: string[]): boolean {
+	if (words[1] === "api") {
+		return !(isReadOnlyApiHelpCommand(words) || isReadOnlyApiCommand(words));
+	}
 	if (words[1] !== "auth") return false;
 	if (words[2] === "token") return true;
 	return (
@@ -958,6 +1058,7 @@ function isAllowedSimpleCommand(
 		parsed !== undefined &&
 		!isBlockedCommand(parsed.command) &&
 		(isReadOnlyMacOSCommand(parsed.command) ||
+			isReadOnlyCliCommand(parsed.command) ||
 			isReadOnlySimctlCommand(parsed.command) ||
 			isReadOnlyGitDirectoryCommand(parsed.command) ||
 			[...rules, ...sessionRules].some((rule) =>

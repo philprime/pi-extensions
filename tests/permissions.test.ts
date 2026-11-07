@@ -1680,6 +1680,49 @@ test("auto-allows inspecting the GitHub login", async () => {
 	assert.deepEqual(selectCalls, []);
 });
 
+test("auto-allows GET-only GitHub and Sentry API inspection", async () => {
+	const projectDirectory = createProject([]);
+	for (const command of [
+		"gh api repos/{owner}/{repo}/issues --jq '.[].title'",
+		"gh api -X GET repos/{owner}/{repo}/pulls --paginate",
+		"sentry api organizations/ --json",
+		"sentry api issues/123/ --method GET --fields id,title",
+	]) {
+		const { result, selectCalls } = await invoke(command, projectDirectory);
+		assert.equal(result, undefined, command);
+		assert.deepEqual(selectCalls, [], command);
+	}
+});
+
+test("keeps mutating or ambiguous API commands behind approval even with broad rules", async () => {
+	const projectDirectory = createProject(["gh api *", "sentry api *"]);
+	for (const command of [
+		"gh api repos/{owner}/{repo}/issues -f title=test",
+		"gh api repos/{owner}/{repo}/issues --method=POST",
+		"gh api repos/{owner}/{repo}/issues -XPOST",
+		"gh api repos/{owner}/{repo}/issues --input payload.json",
+		"gh api graphql",
+		"gh api /graphql",
+		"gh api /graphql?query=query",
+		"gh api user -X POST --help",
+		"gh stack --help",
+		"gh api user --hostname example.com",
+		"sentry api issues/123/ --method PUT",
+		'sentry api issues/123/ -d \'{"status":"resolved"}\'',
+		"sentry api issues/123/ --field status=resolved",
+		"sentry api issues/123/ --input payload.json",
+		"sentry api https://example.com/api/0/issues/123/",
+	]) {
+		const { result, selectCalls } = await invoke(command, projectDirectory);
+		assert.deepEqual(
+			result,
+			{ block: true, reason: "Blocked by user" },
+			command,
+		);
+		assert.equal(selectCalls.length, 1, command);
+	}
+});
+
 test("keeps modified branch and API inspection commands behind approval", async () => {
 	const projectDirectory = createProject([]);
 	for (const command of [
@@ -1892,13 +1935,73 @@ test("auto-allows additional built-in low-risk commands", async () => {
 	}
 });
 
+test("auto-allows help for built-in GitHub and Sentry commands", async () => {
+	const projectDirectory = createProject([]);
+	for (const command of [
+		"gh --help",
+		"gh help api",
+		"gh api --help",
+		"gh api repos/{owner}/{repo}/issues --help",
+		"gh project item-list --help",
+		"sentry --help",
+		"sentry api --help",
+		"sentry api issues/123/ --help",
+		"sentry alert issues list --help",
+	]) {
+		const { result, selectCalls } = await invoke(command, projectDirectory);
+		assert.equal(result, undefined, command);
+		assert.deepEqual(selectCalls, [], command);
+	}
+});
+
+test("auto-allows documented GitHub inspection commands", async () => {
+	const projectDirectory = createProject([]);
+	for (const command of [
+		"gh gist list",
+		"gh gist view gist-id",
+		"gh org list",
+		"gh project field-list 1 --owner org",
+		"gh project item-list 1 --owner org",
+		"gh project view 1 --owner org",
+		"gh workflow list",
+		"gh workflow view build.yml",
+		"gh ruleset check main",
+		"gh cache list",
+	]) {
+		const { result, selectCalls } = await invoke(command, projectDirectory);
+		assert.equal(result, undefined, command);
+		assert.deepEqual(selectCalls, [], command);
+	}
+});
+
+test("auto-allows documented Sentry inspection commands", async () => {
+	const projectDirectory = createProject([]);
+	for (const command of [
+		"sentry alert issues list org/project",
+		"sentry alert metrics view org/project/123",
+		"sentry agent-conversation view org/conversation-id",
+		"sentry debug-files check App.dSYM",
+		"sentry feedback list org/project",
+		"sentry monitor list org/project",
+		"sentry platform list",
+		"sentry sourcemap resolve ./dist",
+		"sentry status show",
+	]) {
+		const { result, selectCalls } = await invoke(command, projectDirectory);
+		assert.equal(result, undefined, command);
+		assert.deepEqual(selectCalls, [], command);
+	}
+});
+
 test("keeps sensitive and mutating Sentry commands behind approval", async () => {
 	const projectDirectory = createProject([]);
 	const commands = [
-		"sentry api /api/0/projects/",
+		"sentry api projects/ -X DELETE",
 		"sentry auth token",
 		"sentry auth status --show-token",
 		"sentry issue resolve PROJECT-1",
+		"sentry issue explain PROJECT-1 --force",
+		"sentry monitor run nightly -- echo ready",
 		"sentry project delete org/project",
 	];
 
