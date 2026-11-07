@@ -1658,6 +1658,38 @@ describe("macOS default inspection permissions", () => {
 	}
 });
 
+test("auto-allows manual pages with a fixed noninteractive pager", async () => {
+	const projectDirectory = createProject([]);
+	for (const command of [
+		"man -P cat ps",
+		"man -P cat 2 stat",
+		"man -P cat man | head -20",
+	]) {
+		const { result, selectCalls } = await invoke(command, projectDirectory);
+		assert.equal(result, undefined, command);
+		assert.deepEqual(selectCalls, [], command);
+	}
+});
+
+test("keeps unsafe manual-page options behind approval even with a broad rule", async () => {
+	const projectDirectory = createProject(["man *"]);
+	for (const command of [
+		"man ps",
+		"man -P custom-tool ps",
+		"man -P cat -M ./docs ps",
+		"man -P cat ../../docs/ps.1",
+		"man -P cat ps -P custom-tool",
+	]) {
+		const { result, selectCalls } = await invoke(command, projectDirectory);
+		assert.deepEqual(
+			result,
+			{ block: true, reason: "Blocked by user" },
+			command,
+		);
+		assert.equal(selectCalls.length, 1, command);
+	}
+});
+
 test("auto-allows listing local and remote branches with a pattern", async () => {
 	const projectDirectory = createProject([]);
 	const { result, selectCalls } = await invoke(
