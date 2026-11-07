@@ -1039,6 +1039,17 @@ test("allows a pipeline when every command matches an allow rule", async () => {
 	assert.deepEqual(selectCalls, []);
 });
 
+test("allows a pipeline with backslashes in a single-quoted search pattern", async () => {
+	const projectDirectory = createProject([]);
+	const { result, selectCalls } = await invoke(
+		String.raw`git diff --cached -- fastlane/lanes | rg -n -C 4 '\bif\b|\bunless\b' | head -110`,
+		projectDirectory,
+	);
+
+	assert.equal(result, undefined);
+	assert.deepEqual(selectCalls, []);
+});
+
 test("prompts for each unallowlisted command in a pipeline and offers an amend option", async () => {
 	const projectDirectory = createProject([]);
 	const { result, selectCalls } = await invoke(

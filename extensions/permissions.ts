@@ -375,14 +375,14 @@ function splitShellCommands(command: string): string[] | undefined {
 	for (let index = 0; index < command.length; index++) {
 		const character = command[index];
 
-		if (character === "\\") {
-			if (command[index + 1] !== "\n") return undefined;
-			index++;
+		if (quote === "'") {
+			if (character === "'") quote = undefined;
 			continue;
 		}
 
-		if (quote === "'") {
-			if (character === "'") quote = undefined;
+		if (character === "\\") {
+			if (command[index + 1] !== "\n") return undefined;
+			index++;
 			continue;
 		}
 
