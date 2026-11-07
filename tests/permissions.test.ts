@@ -875,6 +875,123 @@ test("requires approval for a git push after Git global options", async () => {
 	);
 });
 
+test("prompts for mutating forms of built-in inspection commands", async () => {
+	const cwd = createEmptyProject();
+	for (const command of [
+		"find . -name '*.ts' -delete",
+		"find . -exec rm {} +",
+		"find . -execdir rm {} +",
+		"find . -ok rm {} +",
+		"find . -fprint output.txt",
+		"sed -i 's/old/new/' file.txt",
+		"sed --in-place 's/old/new/' file.txt",
+		"sed 'w output.txt' file.txt",
+		"sed 'e id' file.txt",
+		"sed -n '1,20p' -i file.txt",
+		"xargs rm",
+		"awk '{ system(\"rm file\") }' file.txt",
+		"sort -o output.txt file.txt",
+		"sort --output=output.txt file.txt",
+		"sort -uooutput.txt file.txt",
+		"git diff --output=output.patch",
+	]) {
+		const { result, selectCalls } = await invoke(command, cwd);
+		assert.deepEqual(
+			result,
+			{ block: true, reason: "Blocked by user" },
+			command,
+		);
+		assert.equal(selectCalls.length, 1, command);
+	}
+});
+
+test("mutating inspection flags still prompt under broad allow rules", async () => {
+	const cwd = createProject(["find *", "sed *", "sort *", "git *"]);
+	for (const command of [
+		"find . -delete",
+		"sed -i.bak 's/a/b/' file",
+		"sort -o output file",
+		"git diff --output output.patch",
+	]) {
+		const { result, selectCalls } = await invoke(command, cwd);
+		assert.deepEqual(
+			result,
+			{ block: true, reason: "Blocked by user" },
+			command,
+		);
+		assert.equal(selectCalls.length, 1, command);
+	}
+});
+
+test("prompts for additional writes and executions exposed by inspection utilities", async () => {
+	const cwd = createEmptyProject();
+	for (const command of [
+		"rg --pre=sh pattern .",
+		"rg --hostname-bin=sh pattern .",
+		"tree -fo output.txt",
+		"tree -o output.txt",
+		"uniq input.txt output.txt",
+		"base64 -o output.txt",
+		"yq -i '.value = 1' input.yml",
+		"yq -Pi '.value = 1' input.yml",
+		"yq --split-exp '.name' input.yml",
+		"yq --security-enable-system-operator 'system(\"id\")' input.yml",
+		"date 010100002025",
+		"sort --compress-program=sh input.txt",
+		"sort -T . input.txt",
+		"git config --list --edit",
+		"git fetch origin",
+		"git reflog expire --all",
+		"git branch --list -d topic",
+		"git branch --list -vd topic",
+		"git branch --list -u origin/main topic",
+		"git tag --list -d v1",
+		"git diff --ext-diff",
+		"git grep --open-files-in-pager=sh pattern",
+	]) {
+		const { result, selectCalls } = await invoke(command, cwd);
+		assert.deepEqual(
+			result,
+			{ block: true, reason: "Blocked by user" },
+			command,
+		);
+		assert.equal(selectCalls.length, 1, command);
+	}
+});
+
+test("does not auto-allow shell expansions hidden inside quoted arguments", async () => {
+	const cwd = createEmptyProject();
+	for (const command of [
+		'find . -name "$(touch output.txt)"',
+		'rg "`touch output.txt`" .',
+		"find . $FLAGS",
+		"find . \\-delete",
+		"sort \\-o output.txt input.txt",
+	]) {
+		const { result, selectCalls } = await invoke(command, cwd);
+		assert.deepEqual(
+			result,
+			{ block: true, reason: "Blocked by user" },
+			command,
+		);
+		assert.equal(selectCalls.length, 1, command);
+	}
+});
+
+test("keeps read-only find, sed, sort and git diff automatically allowed", async () => {
+	const cwd = createEmptyProject();
+	for (const command of [
+		"find . -name '*.ts' -print",
+		"sed -n '1,20p' file.txt",
+		"sort file.txt",
+		"git diff --stat",
+	]) {
+		const { result, selectCalls } = await invoke(command, cwd);
+		assert.equal(result, undefined, command);
+		assert.deepEqual(selectCalls, [], command);
+	}
+});
+
 test("allows a non-blocked Git subcommand matching an allow rule", async () => {
 	const projectDirectory = createProject(["git *"]);
 	const { result, selectCalls } = await invoke(
