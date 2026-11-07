@@ -33,7 +33,6 @@ const DEFAULT_ALLOW_RULES: string[] = [
 	"rg:*",
 	"grep:*",
 	"sed:*",
-	"awk:*",
 	"sort:*",
 	"uniq:*",
 	"comm:*",
@@ -43,7 +42,6 @@ const DEFAULT_ALLOW_RULES: string[] = [
 	"diff:*",
 	"jq:*",
 	"yq:*",
-	"xargs:*",
 	"col:*",
 	"colrm:*",
 	"column:*",
@@ -102,8 +100,9 @@ const DEFAULT_ALLOW_RULES: string[] = [
 	"git ls-tree:*",
 	"git ls-remote:*",
 	"git show-ref:*",
-	"git reflog:*",
-	"git fetch:*",
+	"git reflog",
+	"git reflog show:*",
+	"git reflog list:*",
 	"git branch --list:*",
 	"git branch --show-current:*",
 	"git branch -vv:*",
@@ -377,6 +376,7 @@ function splitShellCommands(command: string): string[] | undefined {
 		const character = command[index];
 
 		if (character === "\\") {
+			if (command[index + 1] !== "\n") return undefined;
 			index++;
 			continue;
 		}
@@ -387,10 +387,12 @@ function splitShellCommands(command: string): string[] | undefined {
 		}
 
 		if (quote === '"') {
+			if (character === "$" || character === "`") return undefined;
 			if (character === '"') quote = undefined;
 			continue;
 		}
 
+		if (character === "$" || character === "`") return undefined;
 		if (character === "'" || character === '"') {
 			quote = character;
 			continue;
@@ -729,6 +731,14 @@ function isBlockedSentryCommand(words: string[]): boolean {
 	);
 }
 
+function hasShortOption(words: string[], options: string): boolean {
+	return words.some(
+		(word) =>
+			/^-[^-]/.test(word) &&
+			[...word.slice(1)].some((character) => options.includes(character)),
+	);
+}
+
 function isBlockedCommand(command: string): boolean {
 	const words = shellWords(command).map((word) =>
 		word.replace(/^("|')|("|')$/g, ""),
@@ -736,9 +746,92 @@ function isBlockedCommand(command: string): boolean {
 	const name = words[0];
 	if (name === undefined) return false;
 	if (BLOCKED_FIRST_WORDS.has(name)) return true;
+	if (name === "find") {
+		return words
+			.slice(1)
+			.some((word) =>
+				/^-delete$|^-exec(dir)?$|^-ok(dir)?$|^-fprint(0)?$|^-fprintf$|^-fls$/.test(
+					word,
+				),
+			);
+	}
+	if (name === "sed") {
+		// Only the simple print-address form is safe to auto-approve. Sed
+		// scripts can also execute commands or write files without -i.
+		const args = words.slice(1).filter((word) => word !== "-n");
+		return (
+			args.length < 2 ||
+			!/^\d+(,\d+)?p$/.test(args[0]) ||
+			args.slice(1).some((word) => word.startsWith("-"))
+		);
+	}
+	const args = words.slice(1);
+	if (name === "rg") {
+		return args.some((word) => /^(--pre|--hostname-bin)(=|$)/.test(word));
+	}
+	if (name === "tree" || name === "base64") {
+		return (
+			hasShortOption(args, "o") ||
+			args.some((word) => /^(--output)(=|$)/.test(word))
+		);
+	}
+	if (name === "uniq") {
+		return args.filter((word) => !word.startsWith("-")).length > 1;
+	}
+	if (name === "date") {
+		return args.some(
+			(word) =>
+				!/^(-[jnuR]|-I(?:date|hours|minutes|seconds|ns)?|\+.*)$/.test(word),
+		);
+	}
+	if (name === "yq") {
+		return (
+			hasShortOption(args, "is") ||
+			args.some((word) =>
+				/^(--inplace|--split-exp(?:-file)?|--security-enable-system-operator)(=|$)/.test(
+					word,
+				),
+			)
+		);
+	}
+	if (name === "sort") {
+		return (
+			hasShortOption(args, "oT") ||
+			args.some((word) =>
+				/^(--output|--compress-program|--temporary-directory)(=|$)/.test(word),
+			)
+		);
+	}
 	if (name === "git") {
 		const subcommand = gitSubcommand(words);
-		return subcommand !== undefined && BLOCKED_GIT_SUBCOMMANDS.has(subcommand);
+		return (
+			(subcommand !== undefined && BLOCKED_GIT_SUBCOMMANDS.has(subcommand)) ||
+			subcommand === "fetch" ||
+			(subcommand === "reflog" &&
+				args.some((word) =>
+					["expire", "delete", "drop", "write"].includes(word),
+				)) ||
+			(subcommand === "branch" &&
+				args.some((word) =>
+					/^-[^-]*[dDmMcCfu]|^--(?:delete|move|copy|force|edit-description|set-upstream-to|unset-upstream|create-reflog)(?:=|$)/.test(
+						word,
+					),
+				)) ||
+			(subcommand === "config" &&
+				args.some((word) => word === "-e" || word === "--edit")) ||
+			(subcommand === "tag" &&
+				args.some((word) =>
+					/^-[^-]*[dfasumFe]|^--(?:delete|force|annotate|sign|create-reflog)$/.test(
+						word,
+					),
+				)) ||
+			args.some((word) =>
+				/^(--output|--ext-diff|--textconv|--open-files-in-pager)(=|$)/.test(
+					word,
+				),
+			) ||
+			(subcommand === "grep" && args.includes("-O"))
+		);
 	}
 	if (name === "gh") return isBlockedGhCommand(words);
 	if (name === "sentry") return isBlockedSentryCommand(words);
