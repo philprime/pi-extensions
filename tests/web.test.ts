@@ -14,7 +14,13 @@ import { Value } from "typebox/value";
 import { afterEach, test, vi } from "vitest";
 import webExtension, { registerWebTools } from "../extensions/web.ts";
 
-const success: ExecResult = { stdout: "", stderr: "", code: 0, killed: false };
+const success: ExecResult = {
+	stdout: "",
+	stderr: "",
+	code: 0,
+	killed: false,
+	truncated: false,
+};
 const model = {
 	id: "gpt-6.1-sol",
 	name: "GPT-6.1 Sol",
@@ -460,6 +466,7 @@ test("web_search rejects blank queries before invoking a backend", async () => {
 test("web_fetch reports process errors instead of returning partial output", async () => {
 	const extension = setup({
 		exec: async () => ({
+			...success,
 			stdout: "partial",
 			stderr: "backend unavailable",
 			code: 1,
