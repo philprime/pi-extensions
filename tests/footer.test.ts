@@ -30,7 +30,7 @@ function createExtension() {
 	return handlers;
 }
 
-function createContext(provider: string) {
+function createContext(provider: string, usingOAuth = false) {
 	let footerFactory: FooterFactory | undefined;
 	const ctx = {
 		mode: "tui",
@@ -41,6 +41,12 @@ function createContext(provider: string) {
 			id: "gpt-6-astra",
 			reasoning: true,
 			contextWindow: 272_000,
+		},
+		modelRegistry: {
+			isUsingOAuth(model: { provider: string }) {
+				assert.equal(model, ctx.model);
+				return usingOAuth;
+			},
 		},
 		getContextUsage() {
 			return { tokens: 187_408, contextWindow: 272_000, percent: 68.9 };
@@ -90,42 +96,52 @@ function renderFooter(factory: FooterFactory): string[] {
 	).render(160);
 }
 
-test("shows only context usage and model details for OpenAI Codex", () => {
-	const handlers = createExtension();
-	const { ctx, getFooterFactory } = createContext("openai-codex");
+test.each(["openai", "openai-codex", "anthropic"])(
+	"shows only context usage and model details for %s subscriptions",
+	(provider) => {
+		const handlers = createExtension();
+		const { ctx, getFooterFactory } = createContext(provider, true);
 
-	handlers.get("session_start")?.(
-		{ type: "session_start", reason: "startup" },
-		ctx,
-	);
+		handlers.get("session_start")?.(
+			{ type: "session_start", reason: "startup" },
+			ctx,
+		);
 
-	const factory = getFooterFactory();
-	assert.ok(factory, "OpenAI Codex should install the compact footer");
-	const lines = renderFooter(factory);
-	assert.equal(lines[0], "/Volumes/Developer/philprime/PirateTrader (main)");
-	assert.match(lines[1] ?? "", /^68\.9%\/272k \(auto\) +gpt-6-astra • medium$/);
-	assert.doesNotMatch(lines[1] ?? "", /[↑↓$]|\b(?:R|W|CH)\d/);
-});
+		const factory = getFooterFactory();
+		assert.ok(factory, "OAuth subscriptions should install the compact footer");
+		const lines = renderFooter(factory);
+		assert.equal(lines[0], "/Volumes/Developer/philprime/PirateTrader (main)");
+		assert.match(
+			lines[1] ?? "",
+			/^68\.9%\/272k \(auto\) +gpt-6-astra • medium$/,
+		);
+		assert.doesNotMatch(lines[1] ?? "", /[↑↓$]|\b(?:R|W|CH)\d/);
+	},
+);
 
-test("restores the built-in footer for providers other than OpenAI Codex", () => {
-	const handlers = createExtension();
-	const { ctx, getFooterFactory } = createContext("openai-codex");
-	handlers.get("session_start")?.(
-		{ type: "session_start", reason: "startup" },
-		ctx,
-	);
-	assert.ok(getFooterFactory());
+test.each(["openai", "anthropic"])(
+	"restores the built-in footer when switching to %s API-key authentication",
+	(provider) => {
+		const handlers = createExtension();
+		const { ctx, getFooterFactory } = createContext("openai", true);
+		handlers.get("session_start")?.(
+			{ type: "session_start", reason: "startup" },
+			ctx,
+		);
+		assert.ok(getFooterFactory());
 
-	const anthropicContext = createContext("anthropic");
-	handlers.get("model_select")?.(
-		{
-			type: "model_select",
-			model: anthropicContext.ctx.model,
-			previousModel: ctx.model,
-			source: "set",
-		},
-		anthropicContext.ctx,
-	);
+		const apiKeyContext = createContext(provider);
+		apiKeyContext.ctx.ui.setFooter(getFooterFactory());
+		handlers.get("model_select")?.(
+			{
+				type: "model_select",
+				model: apiKeyContext.ctx.model,
+				previousModel: ctx.model,
+				source: "set",
+			},
+			apiKeyContext.ctx,
+		);
 
-	assert.equal(anthropicContext.getFooterFactory(), undefined);
-});
+		assert.equal(apiKeyContext.getFooterFactory(), undefined);
+	},
+);
