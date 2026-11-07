@@ -724,6 +724,17 @@ function gitSubcommand(words: string[]): string | undefined {
 	return undefined;
 }
 
+function isReadOnlyManCommand(words: string[]): boolean {
+	if (words[0] !== "man" || words[1] !== "-P" || words[2] !== "cat")
+		return false;
+	const pages = words.slice(3);
+	if (/^[1-9]$/.test(pages[0])) pages.shift();
+	return (
+		pages.length > 0 &&
+		pages.every((page) => /^[A-Za-z0-9][A-Za-z0-9._+-]*$/.test(page))
+	);
+}
+
 function isReadOnlyGhHelpCommand(words: string[]): boolean {
 	return (
 		words[0] === "gh" &&
@@ -802,6 +813,7 @@ function isReadOnlyCliCommand(command: string): boolean {
 		word.replace(/^("|')|("|')$/g, ""),
 	);
 	return (
+		isReadOnlyManCommand(words) ||
 		isReadOnlyGhHelpCommand(words) ||
 		isReadOnlyApiHelpCommand(words) ||
 		isReadOnlyApiCommand(words)
@@ -848,6 +860,7 @@ function isBlockedCommand(command: string): boolean {
 	const name = words[0];
 	if (name === undefined) return false;
 	if (BLOCKED_FIRST_WORDS.has(name)) return true;
+	if (name === "man") return !isReadOnlyManCommand(words);
 	if (name === "find") {
 		return words
 			.slice(1)
