@@ -1631,6 +1631,23 @@ describe("process and manual inspection patterns from agent history", () => {
 		assert.equal(selectCalls.length, 1);
 	});
 
+	for (const command of [
+		"pgrep $'node'",
+		"pgrep $'x\\' ; custom-tool ; \\'x'",
+		"pgrep $'node' > .env",
+	]) {
+		test(`requires whole-command approval for unsupported ANSI-C quoting: ${command}`, async () => {
+			const { result, selectCalls } = await invoke(
+				command,
+				createProject(["pgrep:*"]),
+			);
+			assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+			assert.equal(selectCalls.length, 1);
+			assert.ok(selectCalls[0].message.includes(command));
+			assert.deepEqual(selectCalls[0].options, ["Yes", "No"]);
+		});
+	}
+
 	test("configured denies override built-in process and manual inspection", async () => {
 		const cwd = createProject([]);
 		writePiPermissions(cwd, {

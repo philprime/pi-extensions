@@ -397,6 +397,7 @@ function splitShellCommands(command: string): string[] | undefined {
 		}
 
 		if (
+			(character === "$" && command[index + 1] === "'") ||
 			(character === "<" && command[index + 1] === "<") ||
 			character === "`" ||
 			character === "(" ||
@@ -532,7 +533,8 @@ function parseOutputRedirections(
 			quote = character;
 			continue;
 		}
-		if (character === "<") return undefined;
+		if (character === "<" || (character === "$" && command[index + 1] === "'"))
+			return undefined;
 		if (character !== ">") continue;
 
 		let redirectionStart = index;
