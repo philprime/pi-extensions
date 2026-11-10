@@ -1595,6 +1595,42 @@ describe("process and manual inspection patterns from agent history", () => {
 		});
 	}
 
+	for (const separator of ["\n", ";", "&&", "||", "|"]) {
+		test(`does not hide command separators after a single-quoted backslash: ${JSON.stringify(separator)}`, async () => {
+			const cwd = createProject([]);
+			writePiPermissions(cwd, { deny: ["Bash(custom-tool:*)"] });
+			const command = `pgrep -- 'x\\'${separator}custom-tool${separator}'a\\'`;
+			const { result, selectCalls } = await invoke(command, cwd);
+			assert.deepEqual(result, {
+				block: true,
+				reason: 'Bash command matches deny rule "Bash(custom-tool:*)"',
+			});
+			assert.deepEqual(selectCalls, []);
+		});
+	}
+
+	test("does not hide unsafe redirections after a single-quoted backslash", async () => {
+		const { result, selectCalls } = await invoke(
+			"pgrep 'x\\' > .env 'a\\'",
+			createProject(["pgrep:*"]),
+		);
+		assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+		assert.equal(selectCalls.length, 1);
+		assert.equal(
+			selectCalls[0].options.some((option) => option.startsWith("Yes, and")),
+			false,
+		);
+	});
+
+	test("requires approval for single-quoted inspection patterns containing backslashes", async () => {
+		const { result, selectCalls } = await invoke(
+			"pgrep -f 'node\\.js'",
+			createProject([]),
+		);
+		assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+		assert.equal(selectCalls.length, 1);
+	});
+
 	test("configured denies override built-in process and manual inspection", async () => {
 		const cwd = createProject([]);
 		writePiPermissions(cwd, {

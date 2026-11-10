@@ -376,7 +376,7 @@ function splitShellCommands(command: string): string[] | undefined {
 	for (let index = 0; index < command.length; index++) {
 		const character = command[index];
 
-		if (character === "\\") {
+		if (character === "\\" && quote !== "'") {
 			index++;
 			continue;
 		}
@@ -516,7 +516,7 @@ function parseOutputRedirections(
 
 	for (let index = 0; index < command.length; index++) {
 		const character = command[index];
-		if (character === "\\") {
+		if (character === "\\" && quote !== "'") {
 			index++;
 			continue;
 		}
@@ -799,7 +799,7 @@ function literalInspectionWords(command: string): string[] | undefined {
 	const words = shellWords(command);
 	if (
 		!words.every((word) =>
-			/^(?:[A-Za-z0-9_./,:@%+=-]+|'[^']*'|"[^"$`\\]*")$/.test(word),
+			/^(?:[A-Za-z0-9_./,:@%+=-]+|'[^'\\]*'|"[^"$`\\]*")$/.test(word),
 		)
 	)
 		return undefined;
