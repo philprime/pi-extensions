@@ -24,6 +24,11 @@ const EventSchema = Type.Object({
 	type: Type.String(),
 	response: Type.Optional(Type.Unknown()),
 });
+const OutputItemDoneSchema = Type.Object({
+	type: Type.Literal("response.output_item.done"),
+	output_index: Type.Integer({ minimum: 0 }),
+	item: Type.Unknown(),
+});
 const ResponseSchema = Type.Object({
 	status: Type.Literal("completed"),
 	output: Type.Array(Type.Unknown()),
@@ -99,7 +104,10 @@ async function* readEvents(
 	}
 }
 
-function formatResponse(response: unknown): WebSearchResult {
+function formatResponse(
+	response: unknown,
+	streamedOutput: unknown[],
+): WebSearchResult {
 	if (!Value.Check(ResponseSchema, response))
 		throw new Error("Web search did not return a completed response.");
 	const sources = new Map<string, string>();
@@ -113,7 +121,9 @@ function formatResponse(response: unknown): WebSearchResult {
 			sources.set(source.url, source.title ?? source.url);
 		}
 	};
-	for (const item of response.output) {
+	// Subscription streams can omit output from the final response envelope.
+	const output = response.output.length ? response.output : streamedOutput;
+	for (const item of output) {
 		if (Value.Check(SearchCallSchema, item)) {
 			searched = true;
 			for (const source of item.action?.sources ?? []) addSource(source);
@@ -216,6 +226,7 @@ export function createOpenAISearchBackend(
 				`Web search failed (HTTP ${response.status}). Check ChatGPT plan access, search availability, and usage limits. No API-key fallback was attempted.`,
 			);
 		}
+		const outputItems = new Map<number, unknown>();
 		for await (const event of readEvents(response, requestSignal)) {
 			if (!Value.Check(EventSchema, event))
 				throw new Error("Invalid web search stream event.");
@@ -225,8 +236,15 @@ export function createOpenAISearchBackend(
 				throw new Error(
 					"Web search failed or returned an incomplete response.",
 				);
+			if (Value.Check(OutputItemDoneSchema, event))
+				outputItems.set(event.output_index, event.item);
 			if (event.type === "response.completed")
-				return formatResponse(event.response);
+				return formatResponse(
+					event.response,
+					[...outputItems.entries()]
+						.sort(([a], [b]) => a - b)
+						.map(([, item]) => item),
+				);
 		}
 		throw new Error("Web search stream ended without a completed response.");
 	};

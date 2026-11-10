@@ -5,8 +5,6 @@ import type {
 	ReadonlyFooterDataProvider,
 } from "@earendil-works/pi-coding-agent";
 
-const SUBSCRIPTION_PROVIDER = "openai-codex";
-
 function formatTokens(count: number): string {
 	if (count < 1_000) return count.toString();
 	if (count < 10_000) return `${(count / 1_000).toFixed(1)}k`;
@@ -96,7 +94,7 @@ function createFooter(
 export default function footerExtension(pi: ExtensionAPI): void {
 	const updateFooter = (ctx: ExtensionContext) => {
 		if (ctx.mode !== "tui" || !ctx.hasUI) return;
-		if (ctx.model?.provider !== SUBSCRIPTION_PROVIDER) {
+		if (!ctx.model || !ctx.modelRegistry.isUsingOAuth(ctx.model)) {
 			ctx.ui.setFooter(undefined);
 			return;
 		}

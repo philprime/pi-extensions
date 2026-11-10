@@ -14,7 +14,13 @@ import { Value } from "typebox/value";
 import { afterEach, test, vi } from "vitest";
 import webExtension, { registerWebTools } from "../extensions/web.ts";
 
-const success: ExecResult = { stdout: "", stderr: "", code: 0, killed: false };
+const success: ExecResult = {
+	stdout: "",
+	stderr: "",
+	code: 0,
+	killed: false,
+	truncated: false,
+};
 const model = {
 	id: "gpt-6.1-sol",
 	name: "GPT-6.1 Sol",
@@ -205,6 +211,36 @@ test("web_search uses only subscription OAuth at the public endpoint and preserv
 	assert.equal(text.text.match(/https:\/\/example.com\/article/g)?.length, 1);
 });
 
+test.each([false, true])(
+	"web_search preserves streamed items when the final envelope includes output: %s",
+	async (includesOutput) => {
+		const event = completed();
+		vi.stubGlobal("fetch", async () =>
+			stream([
+				...event.response.output.map((item, output_index) => ({
+					type: "response.output_item.done",
+					output_index,
+					item,
+				})),
+				{
+					...event,
+					response: {
+						...event.response,
+						output: includesOutput ? event.response.output : [],
+					},
+				},
+			]),
+		);
+		const result = await setup().call("web_search", { query: "news" });
+		assert.deepEqual(result.content, [
+			{
+				type: "text",
+				text: "Search résumé\n\nSources:\n\nExample: https://example.com/article",
+			},
+		]);
+	},
+);
+
 test.each([{ oauth: false }, { source: "OPENAI_API_KEY" }, { token: "" }])(
 	"web_search refuses missing or non-subscription authentication: %j",
 	async (options) => {
@@ -235,7 +271,16 @@ test("web_search reports subscription token usage without API costs", async () =
 			},
 		},
 	};
-	vi.stubGlobal("fetch", async () => stream([event]));
+	vi.stubGlobal("fetch", async () =>
+		stream([
+			...event.response.output.map((item, output_index) => ({
+				type: "response.output_item.done",
+				output_index,
+				item,
+			})),
+			{ ...event, response: { ...event.response, output: [] } },
+		]),
+	);
 	const result = await setup().call("web_search", { query: "news" });
 	assert.deepEqual(result.usage, {
 		input: 80,
@@ -460,6 +505,7 @@ test("web_search rejects blank queries before invoking a backend", async () => {
 test("web_fetch reports process errors instead of returning partial output", async () => {
 	const extension = setup({
 		exec: async () => ({
+			...success,
 			stdout: "partial",
 			stderr: "backend unavailable",
 			code: 1,

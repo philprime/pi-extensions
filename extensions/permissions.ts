@@ -33,7 +33,6 @@ const DEFAULT_ALLOW_RULES: string[] = [
 	"rg:*",
 	"grep:*",
 	"sed:*",
-	"awk:*",
 	"sort:*",
 	"uniq:*",
 	"comm:*",
@@ -43,7 +42,6 @@ const DEFAULT_ALLOW_RULES: string[] = [
 	"diff:*",
 	"jq:*",
 	"yq:*",
-	"xargs:*",
 	"col:*",
 	"colrm:*",
 	"column:*",
@@ -102,9 +100,11 @@ const DEFAULT_ALLOW_RULES: string[] = [
 	"git ls-tree:*",
 	"git ls-remote:*",
 	"git show-ref:*",
-	"git reflog:*",
-	"git fetch:*",
+	"git reflog",
+	"git reflog show:*",
+	"git reflog list:*",
 	"git branch --list:*",
+	"git branch -a --list:*",
 	"git branch --show-current:*",
 	"git branch -vv:*",
 	"git tag --list:*",
@@ -116,6 +116,22 @@ const DEFAULT_ALLOW_RULES: string[] = [
 	"git config --get:*",
 	"git config --list:*",
 	// Read-only GitHub CLI inspection
+	"gh --help",
+	"gh help:*",
+	"gh api user --jq '.login'",
+	"gh gist list:*",
+	"gh gist view:*",
+	"gh org list:*",
+	"gh project field-list:*",
+	"gh project item-list:*",
+	"gh project list:*",
+	"gh project view:*",
+	"gh workflow list:*",
+	"gh workflow view:*",
+	"gh ruleset check:*",
+	"gh ruleset list:*",
+	"gh ruleset view:*",
+	"gh cache list:*",
 	"gh pr view:*",
 	"gh pr list:*",
 	"gh pr diff:*",
@@ -140,6 +156,21 @@ const DEFAULT_ALLOW_RULES: string[] = [
 	"sentry docs:*",
 	"sentry auth status:*",
 	"sentry auth whoami:*",
+	"sentry agent-conversation list:*",
+	"sentry agent-conversation view:*",
+	"sentry alert issues list:*",
+	"sentry alert issues view:*",
+	"sentry alert metrics list:*",
+	"sentry alert metrics view:*",
+	"sentry debug-files check:*",
+	"sentry debug-files find:*",
+	"sentry debug-files print-sources:*",
+	"sentry feedback list:*",
+	"sentry feedback view:*",
+	"sentry monitor list:*",
+	"sentry platform list:*",
+	"sentry sourcemap resolve:*",
+	"sentry status show:*",
 	"sentry cli defaults",
 	"sentry cli fix --dry-run",
 	"sentry cli import --dry-run",
@@ -376,21 +407,24 @@ function splitShellCommands(command: string): string[] | undefined {
 	for (let index = 0; index < command.length; index++) {
 		const character = command[index];
 
-		if (character === "\\" && quote !== "'") {
-			index++;
-			continue;
-		}
-
 		if (quote === "'") {
 			if (character === "'") quote = undefined;
 			continue;
 		}
 
+		if (character === "\\") {
+			if (command[index + 1] !== "\n") return undefined;
+			index++;
+			continue;
+		}
+
 		if (quote === '"') {
+			if (character === "$" || character === "`") return undefined;
 			if (character === '"') quote = undefined;
 			continue;
 		}
 
+		if (character === "$" || character === "`") return undefined;
 		if (character === "'" || character === '"') {
 			quote = character;
 			continue;
@@ -692,30 +726,114 @@ function gitSubcommand(words: string[]): string | undefined {
 	return undefined;
 }
 
+function isReadOnlyManCommand(words: string[]): boolean {
+	if (words[0] !== "man") return false;
+	// Never inherit a configurable pager or permit custom manual files/options.
+	let index: number;
+	if (words[1] === "-P" && words[2] === "cat") index = 3;
+	else if (words[1] === "-w") index = 2;
+	else return false;
+	if (/^[1-9][A-Za-z0-9]*$/.test(words[index] ?? "")) index++;
+	return (
+		index < words.length &&
+		words
+			.slice(index)
+			.every((word) => /^[A-Za-z0-9_][A-Za-z0-9_.+-]*$/.test(word))
+	);
+}
+
+function isReadOnlyGhHelpCommand(words: string[]): boolean {
+	return (
+		words[0] === "gh" &&
+		words.length >= 3 &&
+		words.length <= 4 &&
+		words[words.length - 1] === "--help" &&
+		[
+			"api",
+			"auth",
+			"cache",
+			"gist",
+			"issue",
+			"label",
+			"org",
+			"pr",
+			"project",
+			"release",
+			"repo",
+			"ruleset",
+			"run",
+			"search",
+			"status",
+			"workflow",
+		].includes(words[1]) &&
+		words.slice(1, -1).every((word) => /^[a-z][a-z-]*$/.test(word))
+	);
+}
+
+function isReadOnlyApiHelpCommand(words: string[]): boolean {
+	return (
+		(words[0] === "gh" || words[0] === "sentry") &&
+		words[1] === "api" &&
+		(words.length === 3 || (words.length === 4 && !words[2].startsWith("-"))) &&
+		words[words.length - 1] === "--help"
+	);
+}
+
+function isReadOnlyApiCommand(words: string[]): boolean {
+	const cli = words[0];
+	if ((cli !== "gh" && cli !== "sentry") || words[1] !== "api") return false;
+
+	let endpoint: string | undefined;
+	for (let index = 2; index < words.length; index++) {
+		const word = words[index];
+		if (word === "--method" || word === "-X") {
+			if (words[++index]?.toUpperCase() !== "GET") return false;
+			continue;
+		}
+		if (
+			(cli === "gh" && (word === "--jq" || word === "-q")) ||
+			(cli === "sentry" && word === "--fields")
+		) {
+			const value = words[++index];
+			if (!value || value.startsWith("-")) return false;
+			continue;
+		}
+		if (
+			(cli === "gh" &&
+				["--paginate", "--slurp", "--silent", "--include"].includes(word)) ||
+			(cli === "sentry" && ["--json", "--silent"].includes(word))
+		)
+			continue;
+		if (word.startsWith("-") || endpoint !== undefined) return false;
+		endpoint = word;
+	}
+
+	return (
+		endpoint !== undefined &&
+		!/^\/?graphql(?:[?#]|$)/i.test(endpoint) &&
+		!/^https?:\/\//i.test(endpoint)
+	);
+}
+
+function isReadOnlyCliCommand(command: string): boolean {
+	const words = shellWords(command).map((word) =>
+		word.replace(/^("|')|("|')$/g, ""),
+	);
+	return (
+		isReadOnlyManCommand(words) ||
+		isReadOnlyGhHelpCommand(words) ||
+		isReadOnlyApiHelpCommand(words) ||
+		isReadOnlyApiCommand(words)
+	);
+}
+
 function isBlockedGhCommand(words: string[]): boolean {
+	if (isReadOnlyGhHelpCommand(words) || isReadOnlyApiHelpCommand(words))
+		return false;
 	const resource = words[1];
 	if (resource === undefined || resource.startsWith("-")) return false;
 
-	// `gh api` can mutate through a non-GET method or field flags.
-	if (resource === "api") {
-		for (let index = 2; index < words.length; index++) {
-			const word = words[index];
-			if (word === "-X" || word === "--method") {
-				const method = (words[index + 1] ?? "").toUpperCase();
-				if (method && method !== "GET") return true;
-				index++;
-				continue;
-			}
-			if (
-				word === "-f" ||
-				word === "-F" ||
-				word === "--field" ||
-				word === "--raw-field"
-			)
-				return true;
-		}
-		return false;
-	}
+	if (resource === "api") return !isReadOnlyApiCommand(words);
 
 	const action = words[2];
 	if (action === undefined || action.startsWith("-")) return false;
@@ -723,11 +841,22 @@ function isBlockedGhCommand(words: string[]): boolean {
 }
 
 function isBlockedSentryCommand(words: string[]): boolean {
+	if (words[1] === "api") {
+		return !(isReadOnlyApiHelpCommand(words) || isReadOnlyApiCommand(words));
+	}
 	if (words[1] !== "auth") return false;
 	if (words[2] === "token") return true;
 	return (
 		words[2] === "status" &&
 		words.slice(3).some((word) => word.startsWith("--show-token"))
+	);
+}
+
+function hasShortOption(words: string[], options: string): boolean {
+	return words.some(
+		(word) =>
+			/^-[^-]/.test(word) &&
+			[...word.slice(1)].some((character) => options.includes(character)),
 	);
 }
 
@@ -738,9 +867,93 @@ function isBlockedCommand(command: string): boolean {
 	const name = words[0];
 	if (name === undefined) return false;
 	if (BLOCKED_FIRST_WORDS.has(name)) return true;
+	if (name === "man") return !isReadOnlyManCommand(words);
+	if (name === "find") {
+		return words
+			.slice(1)
+			.some((word) =>
+				/^-delete$|^-exec(dir)?$|^-ok(dir)?$|^-fprint(0)?$|^-fprintf$|^-fls$/.test(
+					word,
+				),
+			);
+	}
+	if (name === "sed") {
+		// Only the simple print-address form is safe to auto-approve. Sed
+		// scripts can also execute commands or write files without -i.
+		const args = words.slice(1).filter((word) => word !== "-n");
+		return (
+			args.length < 2 ||
+			!/^\d+(,\d+)?p$/.test(args[0]) ||
+			args.slice(1).some((word) => word.startsWith("-"))
+		);
+	}
+	const args = words.slice(1);
+	if (name === "rg") {
+		return args.some((word) => /^(--pre|--hostname-bin)(=|$)/.test(word));
+	}
+	if (name === "tree" || name === "base64") {
+		return (
+			hasShortOption(args, "o") ||
+			args.some((word) => /^(--output)(=|$)/.test(word))
+		);
+	}
+	if (name === "uniq") {
+		return args.filter((word) => !word.startsWith("-")).length > 1;
+	}
+	if (name === "date") {
+		return args.some(
+			(word) =>
+				!/^(-[jnuR]|-I(?:date|hours|minutes|seconds|ns)?|\+.*)$/.test(word),
+		);
+	}
+	if (name === "yq") {
+		return (
+			hasShortOption(args, "is") ||
+			args.some((word) =>
+				/^(--inplace|--split-exp(?:-file)?|--security-enable-system-operator)(=|$)/.test(
+					word,
+				),
+			)
+		);
+	}
+	if (name === "sort") {
+		return (
+			hasShortOption(args, "oT") ||
+			args.some((word) =>
+				/^(--output|--compress-program|--temporary-directory)(=|$)/.test(word),
+			)
+		);
+	}
 	if (name === "git") {
 		const subcommand = gitSubcommand(words);
-		return subcommand !== undefined && BLOCKED_GIT_SUBCOMMANDS.has(subcommand);
+		return (
+			(subcommand !== undefined && BLOCKED_GIT_SUBCOMMANDS.has(subcommand)) ||
+			subcommand === "fetch" ||
+			(subcommand === "reflog" &&
+				args.some((word) =>
+					["expire", "delete", "drop", "write"].includes(word),
+				)) ||
+			(subcommand === "branch" &&
+				args.some((word) =>
+					/^-[^-]*[dDmMcCfu]|^--(?:delete|move|copy|force|edit-description|set-upstream-to|unset-upstream|create-reflog)(?:=|$)/.test(
+						word,
+					),
+				)) ||
+			(subcommand === "config" &&
+				args.some((word) => word === "-e" || word === "--edit")) ||
+			(subcommand === "tag" &&
+				args.some((word) =>
+					/^-[^-]*[dfasumFe]|^--(?:delete|force|annotate|sign|create-reflog)$/.test(
+						word,
+					),
+				)) ||
+			args.some((word) =>
+				/^(--output|--ext-diff|--textconv|--open-files-in-pager)(=|$)/.test(
+					word,
+				),
+			) ||
+			(subcommand === "grep" && args.includes("-O"))
+		);
 	}
 	if (name === "gh") return isBlockedGhCommand(words);
 	if (name === "sentry") return isBlockedSentryCommand(words);
@@ -814,20 +1027,7 @@ function isReadOnlyProcessOrManualCommand(command: string): boolean {
 	const words = literalInspectionWords(command);
 	if (!words) return false;
 
-	if (words[0] === "man") {
-		// Never inherit a configurable pager or permit custom manual files/options.
-		let index: number;
-		if (words[1] === "-P" && words[2] === "cat") index = 3;
-		else if (words[1] === "-w") index = 2;
-		else return false;
-		if (/^[1-9][A-Za-z0-9]*$/.test(words[index] ?? "")) index++;
-		return (
-			index < words.length &&
-			words
-				.slice(index)
-				.every((word) => /^[A-Za-z0-9_][A-Za-z0-9_.+-]*$/.test(word))
-		);
-	}
+	if (words[0] === "man") return isReadOnlyManCommand(words);
 
 	if (words[0] !== "pgrep") return false;
 	let index = 1;
@@ -935,6 +1135,7 @@ function isAllowedSimpleCommand(
 		!isBlockedCommand(parsed.command) &&
 		(isReadOnlyProcessOrManualCommand(parsed.command) ||
 			isReadOnlyMacOSCommand(parsed.command) ||
+			isReadOnlyCliCommand(parsed.command) ||
 			isReadOnlySimctlCommand(parsed.command) ||
 			isReadOnlyGitDirectoryCommand(parsed.command) ||
 			[...rules, ...sessionRules].some((rule) =>

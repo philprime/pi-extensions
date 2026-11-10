@@ -875,6 +875,123 @@ test("requires approval for a git push after Git global options", async () => {
 	);
 });
 
+test("prompts for mutating forms of built-in inspection commands", async () => {
+	const cwd = createEmptyProject();
+	for (const command of [
+		"find . -name '*.ts' -delete",
+		"find . -exec rm {} +",
+		"find . -execdir rm {} +",
+		"find . -ok rm {} +",
+		"find . -fprint output.txt",
+		"sed -i 's/old/new/' file.txt",
+		"sed --in-place 's/old/new/' file.txt",
+		"sed 'w output.txt' file.txt",
+		"sed 'e id' file.txt",
+		"sed -n '1,20p' -i file.txt",
+		"xargs rm",
+		"awk '{ system(\"rm file\") }' file.txt",
+		"sort -o output.txt file.txt",
+		"sort --output=output.txt file.txt",
+		"sort -uooutput.txt file.txt",
+		"git diff --output=output.patch",
+	]) {
+		const { result, selectCalls } = await invoke(command, cwd);
+		assert.deepEqual(
+			result,
+			{ block: true, reason: "Blocked by user" },
+			command,
+		);
+		assert.equal(selectCalls.length, 1, command);
+	}
+});
+
+test("mutating inspection flags still prompt under broad allow rules", async () => {
+	const cwd = createProject(["find *", "sed *", "sort *", "git *"]);
+	for (const command of [
+		"find . -delete",
+		"sed -i.bak 's/a/b/' file",
+		"sort -o output file",
+		"git diff --output output.patch",
+	]) {
+		const { result, selectCalls } = await invoke(command, cwd);
+		assert.deepEqual(
+			result,
+			{ block: true, reason: "Blocked by user" },
+			command,
+		);
+		assert.equal(selectCalls.length, 1, command);
+	}
+});
+
+test("prompts for additional writes and executions exposed by inspection utilities", async () => {
+	const cwd = createEmptyProject();
+	for (const command of [
+		"rg --pre=sh pattern .",
+		"rg --hostname-bin=sh pattern .",
+		"tree -fo output.txt",
+		"tree -o output.txt",
+		"uniq input.txt output.txt",
+		"base64 -o output.txt",
+		"yq -i '.value = 1' input.yml",
+		"yq -Pi '.value = 1' input.yml",
+		"yq --split-exp '.name' input.yml",
+		"yq --security-enable-system-operator 'system(\"id\")' input.yml",
+		"date 010100002025",
+		"sort --compress-program=sh input.txt",
+		"sort -T . input.txt",
+		"git config --list --edit",
+		"git fetch origin",
+		"git reflog expire --all",
+		"git branch --list -d topic",
+		"git branch --list -vd topic",
+		"git branch --list -u origin/main topic",
+		"git tag --list -d v1",
+		"git diff --ext-diff",
+		"git grep --open-files-in-pager=sh pattern",
+	]) {
+		const { result, selectCalls } = await invoke(command, cwd);
+		assert.deepEqual(
+			result,
+			{ block: true, reason: "Blocked by user" },
+			command,
+		);
+		assert.equal(selectCalls.length, 1, command);
+	}
+});
+
+test("does not auto-allow shell expansions hidden inside quoted arguments", async () => {
+	const cwd = createEmptyProject();
+	for (const command of [
+		'find . -name "$(touch output.txt)"',
+		'rg "`touch output.txt`" .',
+		"find . $FLAGS",
+		"find . \\-delete",
+		"sort \\-o output.txt input.txt",
+	]) {
+		const { result, selectCalls } = await invoke(command, cwd);
+		assert.deepEqual(
+			result,
+			{ block: true, reason: "Blocked by user" },
+			command,
+		);
+		assert.equal(selectCalls.length, 1, command);
+	}
+});
+
+test("keeps read-only find, sed, sort and git diff automatically allowed", async () => {
+	const cwd = createEmptyProject();
+	for (const command of [
+		"find . -name '*.ts' -print",
+		"sed -n '1,20p' file.txt",
+		"sort file.txt",
+		"git diff --stat",
+	]) {
+		const { result, selectCalls } = await invoke(command, cwd);
+		assert.equal(result, undefined, command);
+		assert.deepEqual(selectCalls, [], command);
+	}
+});
+
 test("allows a non-blocked Git subcommand matching an allow rule", async () => {
 	const projectDirectory = createProject(["git *"]);
 	const { result, selectCalls } = await invoke(
@@ -915,6 +1032,28 @@ test("allows a pipeline when every command matches an allow rule", async () => {
 	const projectDirectory = createProject(["grep *", "head *"]);
 	const { result, selectCalls } = await invoke(
 		'grep -R "SentryDependencyContainerSwiftHelper" -n Sources/Swift Sources/Sentry | head -150',
+		projectDirectory,
+	);
+
+	assert.equal(result, undefined);
+	assert.deepEqual(selectCalls, []);
+});
+
+test("allows a pipeline with backslashes in a single-quoted search pattern", async () => {
+	const projectDirectory = createProject([]);
+	const { result, selectCalls } = await invoke(
+		String.raw`git diff --cached -- fastlane/lanes | rg -n -C 4 '\bif\b|\bunless\b' | head -110`,
+		projectDirectory,
+	);
+
+	assert.equal(result, undefined);
+	assert.deepEqual(selectCalls, []);
+});
+
+test("allows a pipeline with regex syntax inside a single-quoted pattern", async () => {
+	const projectDirectory = createProject([]);
+	const { result, selectCalls } = await invoke(
+		"rg -n '^#include|^static .*\\{|^void .*\\{|^return |^typedef ' Targets/HALPlugin/Sources --glob '*.{c,h}' | head -95",
 		projectDirectory,
 	);
 
@@ -1548,13 +1687,10 @@ describe("process and manual inspection patterns from agent history", () => {
 		"man -P cat pgrep ps",
 		"man -w ps",
 		"man -w 3 openpty",
-		"man -P cat ps | col -b | sed -n '1,180p'",
 		"pgrep -fl node | head -20",
 		"ps -axo pid,ppid,command | grep node",
 		"sed -n '35,60p' source.ts",
 		"sed -n '900,950p' source.ts",
-		"cat source.ts | sed -n '1,260p'",
-		"sed -n '/<LaunchAction/,/<\\/LaunchAction>/p' scheme.xml",
 	]) {
 		test(`allows safe inspection: ${command}`, async () => {
 			const { result, selectCalls } = await invoke(command, createProject([]));
@@ -1564,6 +1700,9 @@ describe("process and manual inspection patterns from agent history", () => {
 	}
 
 	for (const command of [
+		"man -P cat ps | col -b | sed -n '1,180p'",
+		"cat source.ts | sed -n '1,260p'",
+		"sed -n '/<LaunchAction/,/<\\/LaunchAction>/p' scheme.xml",
 		"pgrep -F custom.pid",
 		"pgrep --unknown node",
 		"pgrep -u custom-user node",
@@ -1661,6 +1800,124 @@ describe("process and manual inspection patterns from agent history", () => {
 			const { result, selectCalls } = await invoke(command, cwd);
 			assert.equal((result as { block: boolean }).block, true);
 			assert.deepEqual(selectCalls, []);
+		}
+	});
+});
+
+describe("CLI inspection permissions", () => {
+	beforeEach(() => {
+		vi.stubEnv("HOME", createEmptyProject());
+	});
+	afterEach(() => {
+		vi.unstubAllEnvs();
+	});
+
+	test("auto-allows manual pages with a fixed noninteractive pager", async () => {
+		const projectDirectory = createProject([]);
+		for (const command of [
+			"man -P cat ps",
+			"man -P cat 2 stat",
+			"man -P cat man | head -20",
+		]) {
+			const { result, selectCalls } = await invoke(command, projectDirectory);
+			assert.equal(result, undefined, command);
+			assert.deepEqual(selectCalls, [], command);
+		}
+	});
+
+	test("keeps unsafe manual-page options behind approval even with a broad rule", async () => {
+		const projectDirectory = createProject(["man *"]);
+		for (const command of [
+			"man ps",
+			"man -P custom-tool ps",
+			"man -P cat -M ./docs ps",
+			"man -P cat ../../docs/ps.1",
+			"man -P cat ps -P custom-tool",
+		]) {
+			const { result, selectCalls } = await invoke(command, projectDirectory);
+			assert.deepEqual(
+				result,
+				{ block: true, reason: "Blocked by user" },
+				command,
+			);
+			assert.equal(selectCalls.length, 1, command);
+		}
+	});
+
+	test("auto-allows listing local and remote branches with a pattern", async () => {
+		const projectDirectory = createProject([]);
+		const { result, selectCalls } = await invoke(
+			"git branch -a --list '*permission*'",
+			projectDirectory,
+		);
+
+		assert.equal(result, undefined);
+		assert.deepEqual(selectCalls, []);
+	});
+
+	test("auto-allows inspecting the GitHub login", async () => {
+		const projectDirectory = createProject([]);
+		const { result, selectCalls } = await invoke(
+			"gh api user --jq '.login'",
+			projectDirectory,
+		);
+
+		assert.equal(result, undefined);
+		assert.deepEqual(selectCalls, []);
+	});
+
+	test("auto-allows GET-only GitHub and Sentry API inspection", async () => {
+		const projectDirectory = createProject([]);
+		for (const command of [
+			"gh api repos/{owner}/{repo}/issues --jq '.[].title'",
+			"gh api -X GET repos/{owner}/{repo}/pulls --paginate",
+			"sentry api organizations/ --json",
+			"sentry api issues/123/ --method GET --fields id,title",
+		]) {
+			const { result, selectCalls } = await invoke(command, projectDirectory);
+			assert.equal(result, undefined, command);
+			assert.deepEqual(selectCalls, [], command);
+		}
+	});
+
+	test("keeps mutating or ambiguous API commands behind approval even with broad rules", async () => {
+		const projectDirectory = createProject(["gh api *", "sentry api *"]);
+		for (const command of [
+			"gh api repos/{owner}/{repo}/issues -f title=test",
+			"gh api repos/{owner}/{repo}/issues --method=POST",
+			"gh api repos/{owner}/{repo}/issues -XPOST",
+			"gh api repos/{owner}/{repo}/issues --input payload.json",
+			"gh api graphql",
+			"gh api /graphql",
+			"gh api /graphql?query=query",
+			"gh api user -X POST --help",
+			"gh stack --help",
+			"gh api user --hostname example.com",
+			"sentry api issues/123/ --method PUT",
+			'sentry api issues/123/ -d \'{"status":"resolved"}\'',
+			"sentry api issues/123/ --field status=resolved",
+			"sentry api issues/123/ --input payload.json",
+			"sentry api https://example.com/api/0/issues/123/",
+		]) {
+			const { result, selectCalls } = await invoke(command, projectDirectory);
+			assert.deepEqual(
+				result,
+				{ block: true, reason: "Blocked by user" },
+				command,
+			);
+			assert.equal(selectCalls.length, 1, command);
+		}
+	});
+
+	test("keeps modified branch and API inspection commands behind approval", async () => {
+		const projectDirectory = createProject([]);
+		for (const command of [
+			"git branch -a --list '*permission*' -d topic",
+			"gh api user --jq '.login' -X PATCH",
+		]) {
+			const { result, selectCalls } = await invoke(command, projectDirectory);
+			assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+			assert.equal(selectCalls.length, 1);
 		}
 	});
 });
@@ -1865,13 +2122,73 @@ test("auto-allows additional built-in low-risk commands", async () => {
 	}
 });
 
+test("auto-allows help for built-in GitHub and Sentry commands", async () => {
+	const projectDirectory = createProject([]);
+	for (const command of [
+		"gh --help",
+		"gh help api",
+		"gh api --help",
+		"gh api repos/{owner}/{repo}/issues --help",
+		"gh project item-list --help",
+		"sentry --help",
+		"sentry api --help",
+		"sentry api issues/123/ --help",
+		"sentry alert issues list --help",
+	]) {
+		const { result, selectCalls } = await invoke(command, projectDirectory);
+		assert.equal(result, undefined, command);
+		assert.deepEqual(selectCalls, [], command);
+	}
+});
+
+test("auto-allows documented GitHub inspection commands", async () => {
+	const projectDirectory = createProject([]);
+	for (const command of [
+		"gh gist list",
+		"gh gist view gist-id",
+		"gh org list",
+		"gh project field-list 1 --owner org",
+		"gh project item-list 1 --owner org",
+		"gh project view 1 --owner org",
+		"gh workflow list",
+		"gh workflow view build.yml",
+		"gh ruleset check main",
+		"gh cache list",
+	]) {
+		const { result, selectCalls } = await invoke(command, projectDirectory);
+		assert.equal(result, undefined, command);
+		assert.deepEqual(selectCalls, [], command);
+	}
+});
+
+test("auto-allows documented Sentry inspection commands", async () => {
+	const projectDirectory = createProject([]);
+	for (const command of [
+		"sentry alert issues list org/project",
+		"sentry alert metrics view org/project/123",
+		"sentry agent-conversation view org/conversation-id",
+		"sentry debug-files check App.dSYM",
+		"sentry feedback list org/project",
+		"sentry monitor list org/project",
+		"sentry platform list",
+		"sentry sourcemap resolve ./dist",
+		"sentry status show",
+	]) {
+		const { result, selectCalls } = await invoke(command, projectDirectory);
+		assert.equal(result, undefined, command);
+		assert.deepEqual(selectCalls, [], command);
+	}
+});
+
 test("keeps sensitive and mutating Sentry commands behind approval", async () => {
 	const projectDirectory = createProject([]);
 	const commands = [
-		"sentry api /api/0/projects/",
+		"sentry api projects/ -X DELETE",
 		"sentry auth token",
 		"sentry auth status --show-token",
 		"sentry issue resolve PROJECT-1",
+		"sentry issue explain PROJECT-1 --force",
+		"sentry monitor run nightly -- echo ready",
 		"sentry project delete org/project",
 	];
 

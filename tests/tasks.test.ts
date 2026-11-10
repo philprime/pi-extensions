@@ -115,11 +115,13 @@ function createExtension(session = SessionManager.inMemory()) {
 		async startAgent() {
 			const event: BeforeAgentStartEvent = {
 				type: "before_agent_start",
+				messageType: "user",
 				prompt: "Continue",
 				systemPrompt: "Existing instructions",
 				systemPromptOptions: {
 					cwd: process.cwd(),
 					selectedTools: ["tasks"],
+					hiddenTools: [],
 					toolSnippets: {},
 					toolGuidelines: {},
 					promptGuidelines: [],
