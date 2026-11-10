@@ -793,6 +793,71 @@ function isReadOnlyGitDirectoryCommand(command: string): boolean {
 	);
 }
 
+// Accept literal arguments only, without interpreting expansions or concatenated
+// quoting. Quoted pgrep patterns may contain regular-expression metacharacters.
+function literalInspectionWords(command: string): string[] | undefined {
+	const words = shellWords(command);
+	if (
+		!words.every((word) =>
+			/^(?:[A-Za-z0-9_./,:@%+=-]+|'[^']*'|"[^"$`\\]*")$/.test(word),
+		)
+	)
+		return undefined;
+	return words.map((word) =>
+		word.startsWith("'") || word.startsWith('"') ? word.slice(1, -1) : word,
+	);
+}
+
+function isReadOnlyProcessOrManualCommand(command: string): boolean {
+	const words = literalInspectionWords(command);
+	if (!words) return false;
+
+	if (words[0] === "man") {
+		// Never inherit a configurable pager or permit custom manual files/options.
+		let index: number;
+		if (words[1] === "-P" && words[2] === "cat") index = 3;
+		else if (words[1] === "-w") index = 2;
+		else return false;
+		if (/^[1-9][A-Za-z0-9]*$/.test(words[index] ?? "")) index++;
+		return (
+			index < words.length &&
+			words
+				.slice(index)
+				.every((word) => /^[A-Za-z0-9_][A-Za-z0-9_.+-]*$/.test(word))
+		);
+	}
+
+	if (words[0] !== "pgrep") return false;
+	let index = 1;
+	let endOfOptions = false;
+	for (; index < words.length; index++) {
+		const word = words[index];
+		if (word === "--") {
+			endOfOptions = true;
+			index++;
+			break;
+		}
+		if (!word.startsWith("-")) break;
+		if (/^-[afilnoqvx]+$/.test(word)) continue;
+		if (
+			/^-[GPUgpu]$/.test(word) &&
+			/^\d+(,\d+)*$/.test(words[index + 1] ?? "")
+		) {
+			index++;
+			continue;
+		}
+		return false;
+	}
+	return (
+		index < words.length &&
+		words
+			.slice(index)
+			.every(
+				(word) => word.length > 0 && (endOfOptions || !word.startsWith("-")),
+			)
+	);
+}
+
 // Mixed-purpose utilities need argument checks rather than prefix rules.
 function isReadOnlyMacOSCommand(command: string): boolean {
 	const words = shellWords(command).map((word) =>
@@ -819,8 +884,9 @@ function isReadOnlyMacOSCommand(command: string): boolean {
 		const word = words[index];
 		if (word === "-p") {
 			if (!/^\d+(,\d+)*$/.test(words[++index] ?? "")) return false;
-		} else if (word === "-o" || word === "-O") {
-			const fields = (words[++index] ?? "").split(",");
+		} else if (/^-[AaCcdefhjlMmrSTvwXx]*[oO]/.test(word)) {
+			const attachedFields = word.replace(/^-[AaCcdefhjlMmrSTvwXx]*[oO]/, "");
+			const fields = (attachedFields || words[++index] || "").split(",");
 			if (
 				!fields.every((field) =>
 					[
@@ -833,8 +899,11 @@ function isReadOnlyMacOSCommand(command: string): boolean {
 						"command",
 						"args",
 						"%cpu",
+						"pcpu",
 						"%mem",
+						"stat",
 						"state",
+						"lstart",
 						"etime",
 						"time",
 						"tty",
@@ -862,7 +931,8 @@ function isAllowedSimpleCommand(
 	return (
 		parsed !== undefined &&
 		!isBlockedCommand(parsed.command) &&
-		(isReadOnlyMacOSCommand(parsed.command) ||
+		(isReadOnlyProcessOrManualCommand(parsed.command) ||
+			isReadOnlyMacOSCommand(parsed.command) ||
 			isReadOnlySimctlCommand(parsed.command) ||
 			isReadOnlyGitDirectoryCommand(parsed.command) ||
 			[...rules, ...sessionRules].some((rule) =>

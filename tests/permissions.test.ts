@@ -1519,6 +1519,99 @@ describe("macOS default inspection permissions", () => {
 	}
 });
 
+describe("process and manual inspection patterns from agent history", () => {
+	beforeEach(() => {
+		vi.stubEnv("HOME", createEmptyProject());
+	});
+	afterEach(() => {
+		vi.unstubAllEnvs();
+	});
+
+	for (const command of [
+		"pgrep node",
+		"pgrep -fl 'node|vitest'",
+		"pgrep -af 'coding-agent'",
+		"pgrep -f 'node .*server'",
+		"pgrep -x node",
+		"pgrep -l -u 501 node",
+		"pgrep -P 123,456 node",
+		"pgrep -- '-worker'",
+		"ps -axo pid,ppid,command",
+		"ps -axo pid,ppid,etime,state,command",
+		"ps -axo pid,ppid,stat,command",
+		"ps -Ao pid,pcpu,comm",
+		"ps -axo pid,lstart,args",
+		"ps -eo pid,ppid,etime,args",
+		"ps -p 123 -o pid,ppid,command",
+		"man -P cat ps",
+		"man -P cat 3 openpty",
+		"man -P cat pgrep ps",
+		"man -w ps",
+		"man -w 3 openpty",
+		"man -P cat ps | col -b | sed -n '1,180p'",
+		"pgrep -fl node | head -20",
+		"ps -axo pid,ppid,command | grep node",
+		"sed -n '35,60p' source.ts",
+		"sed -n '900,950p' source.ts",
+		"cat source.ts | sed -n '1,260p'",
+		"sed -n '/<LaunchAction/,/<\\/LaunchAction>/p' scheme.xml",
+	]) {
+		test(`allows safe inspection: ${command}`, async () => {
+			const { result, selectCalls } = await invoke(command, createProject([]));
+			assert.equal(result, undefined);
+			assert.deepEqual(selectCalls, []);
+		});
+	}
+
+	for (const command of [
+		"pgrep -F custom.pid",
+		"pgrep --unknown node",
+		"pgrep -u custom-user node",
+		"pgrep -P $PID node",
+		'pgrep -f "$PATTERN"',
+		'pgrep -f "$(custom-tool)"',
+		"pgrep -f node | custom-tool",
+		"pkill -f node",
+		"ps -axo pid,env",
+		"ps -axo pid,command -E",
+		"ps -axEo pid,command",
+		"ps -axo $FIELDS",
+		"ps -axo pid,command | custom-tool",
+		"man ps",
+		"man -P custom-tool ps",
+		"man -P 'cat; custom-tool' ps",
+		"man -P cat -P custom-tool ps",
+		"man -P cat -M ./manuals ps",
+		"man -P cat ./custom.1",
+		"man -P cat -t ps",
+		"man -P cat $TOPIC",
+		"man -w ./custom.1",
+		"man -P cat ps | custom-tool",
+	]) {
+		test(`requires approval for uncontrolled inspection: ${command}`, async () => {
+			const { result, selectCalls } = await invoke(command, createProject([]));
+			assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+			assert.equal(selectCalls.length, 1);
+		});
+	}
+
+	test("configured denies override built-in process and manual inspection", async () => {
+		const cwd = createProject([]);
+		writePiPermissions(cwd, {
+			deny: ["Bash(pgrep:*)", "Bash(ps:*)", "Bash(man:*)"],
+		});
+		for (const command of [
+			"pgrep -fl node",
+			"ps -axo pid,command",
+			"man -P cat ps",
+		]) {
+			const { result, selectCalls } = await invoke(command, cwd);
+			assert.equal((result as { block: boolean }).block, true);
+			assert.deepEqual(selectCalls, []);
+		}
+	});
+});
+
 test("auto-allows built-in read-only git without any project allow rule", async () => {
 	const projectDirectory = createProject([]);
 	const { result, selectCalls } = await invoke(
