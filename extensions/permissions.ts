@@ -882,7 +882,7 @@ function isBlockedCommand(command: string): boolean {
 		// scripts can also execute commands or write files without -i.
 		const args = words.slice(1).filter((word) => word !== "-n");
 		return (
-			args.length < 2 ||
+			args.length < 1 ||
 			!/^\d+(,\d+)?p$/.test(args[0]) ||
 			args.slice(1).some((word) => word.startsWith("-"))
 		);
