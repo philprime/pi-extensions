@@ -1691,6 +1691,10 @@ describe("process and manual inspection patterns from agent history", () => {
 		"ps -axo pid,ppid,command | grep node",
 		"sed -n '35,60p' source.ts",
 		"sed -n '900,950p' source.ts",
+		"sed -n '165,194p'",
+		"sed -n '165p'",
+		"man -P cat ps | col -b | sed -n '1,180p'",
+		"cat source.ts | sed -n '1,260p'",
 	]) {
 		test(`allows safe inspection: ${command}`, async () => {
 			const { result, selectCalls } = await invoke(command, createProject([]));
@@ -1700,8 +1704,11 @@ describe("process and manual inspection patterns from agent history", () => {
 	}
 
 	for (const command of [
-		"man -P cat ps | col -b | sed -n '1,180p'",
-		"cat source.ts | sed -n '1,260p'",
+		"sed -n",
+		"sed -n '165,194p' -i",
+		"sed -n '165,194p;w output.txt'",
+		"sed -n 'e id'",
+		"cat source.ts | sed -n '1,260p' | custom-tool",
 		"sed -n '/<LaunchAction/,/<\\/LaunchAction>/p' scheme.xml",
 		"pgrep -F custom.pid",
 		"pgrep --unknown node",
