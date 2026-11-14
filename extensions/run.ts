@@ -185,6 +185,12 @@ export default function runExtension(pi: ExtensionAPI): void {
 		label: "Background Jobs",
 		description:
 			"Start, list, inspect recent logs, restart or stop named background shell jobs. Jobs stop when Pi exits. Starting or restarting needs user approval.",
+		promptSnippet:
+			"Run long-running development commands as managed background jobs with inspectable logs.",
+		promptGuidelines: [
+			"Use background rather than bash for intentionally long-running commands such as development servers and watchers. Do not launch them with shell backgrounding, nohup, or detached processes. Use bash for ordinary commands that finish on their own.",
+			"Give each job a descriptive name. Use background list and logs to check its state and recent output, restart to relaunch it, and stop when it is no longer needed. Starting or restarting through this tool asks the user for approval.",
+		],
 		parameters: Type.Object({
 			action: Type.Unsafe<"start" | "list" | "logs" | "restart" | "stop">({
 				type: "string",

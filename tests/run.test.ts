@@ -44,6 +44,14 @@ function extension(hasUI = true, confirm = async () => true) {
 	} as ExtensionAPI);
 	const instance = {
 		notifications,
+		guidance() {
+			const tool = tools.get("background");
+			assert.ok(tool);
+			return {
+				snippet: tool.promptSnippet,
+				guidelines: tool.promptGuidelines ?? [],
+			};
+		},
 		async command(args: string) {
 			const handler = commands.get("bg");
 			assert.ok(handler);
@@ -89,6 +97,13 @@ const script = (code: string) =>
 const idle = script(
 	"process.stdout.write('ready\\n'); setInterval(() => {}, 1000)",
 );
+
+test("agent is guided to use background for long-lived commands", () => {
+	const guidance = extension().guidance();
+	assert.match(guidance.snippet ?? "", /long-running/);
+	assert.match(guidance.guidelines.join(" "), /background.*rather than.*bash/i);
+	assert.match(guidance.guidelines.join(" "), /logs.*restart.*stop/i);
+});
 
 test("command starts multiple jobs and reads their output independently", async () => {
 	const pi = extension();
