@@ -1472,6 +1472,23 @@ function evaluatedShellWords(command: string): string[] {
 	return words;
 }
 
+function commandMatchesEvaluatedRule(command: string, rule: string): boolean {
+	const isPrefix = rule.endsWith(":*") || rule.endsWith(" *");
+	const ruleCommand = isPrefix ? rule.slice(0, -2) : rule;
+	if (splitShellCommands(ruleCommand)?.length !== 1) return false;
+
+	// Serialize each argument so quoted spaces, empty arguments, and literal
+	// quotes cannot be confused with different argument boundaries or values.
+	const serializeWords = (value: string) =>
+		evaluatedShellWords(value)
+			.map((word) => JSON.stringify(word))
+			.join(" ");
+	return commandMatchesRule(
+		serializeWords(command),
+		serializeWords(ruleCommand) + (isPrefix ? ":*" : ""),
+	);
+}
+
 function suggestedRule(command: string): string {
 	const words = shellWords(command);
 	if (words.length >= 3) return `${words.slice(0, 3).join(" ")} *`;
@@ -1566,7 +1583,9 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 				return (
 					commandMatchesRule(candidate, rule) ||
 					(executableCommand !== undefined &&
-						commandMatchesRule(executableCommand, rule))
+						(commandMatchesRule(executableCommand, rule) ||
+							(commands !== undefined &&
+								commandMatchesEvaluatedRule(executableCommand, rule))))
 				);
 			}),
 		);

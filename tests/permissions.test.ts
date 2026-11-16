@@ -2125,13 +2125,57 @@ describe("GitHub stack permissions", () => {
 		assert.equal(selectCalls.length, 1);
 	});
 
-	test("explicit denies override stack inspection", async () => {
-		const cwd = createProject([]);
-		writePiPermissions(cwd, { deny: ["Bash(gh stack *)"] });
-		const { result, selectCalls } = await invoke("gh stack view --json", cwd);
-		assert.equal((result as { block: boolean }).block, true);
-		assert.deepEqual(selectCalls, []);
-	});
+	for (const rule of [
+		"Bash(gh stack *)",
+		"Bash(gh stack:*)",
+		"Bash(gh stack view --json)",
+	]) {
+		test(`explicit deny ${rule} overrides equivalent stack inspection`, async () => {
+			const cwd = createProject([]);
+			writePiPermissions(cwd, { deny: [rule] });
+			for (const command of [
+				"gh stack view --json",
+				"gh st'a'ck view --json",
+				"g'h' stack view --json",
+				'"gh" stack view --json',
+				'gh stack "view" --json',
+				"gh stack view --j's'on",
+				"gh sta\\\nck view --json",
+				'gh "sta\\\nck" view --json',
+				"gh stack view --json | jq .",
+				"gh st'a'ck view --json | jq .",
+				"gh st'a'ck view --json > /tmp/stack.json",
+			]) {
+				const { result, selectCalls } = await invoke(command, cwd);
+				assert.equal(
+					(result as { block: boolean } | undefined)?.block,
+					true,
+					command,
+				);
+				assert.match(
+					(result as { reason: string }).reason,
+					/matches deny rule/,
+					command,
+				);
+				assert.deepEqual(selectCalls, [], command);
+			}
+		});
+	}
+
+	for (const rule of [
+		"Bash(gh 'stack view' --json)",
+		"Bash(gh stack view --json '')",
+		"Bash(gh stack 'vi\"ew' --json)",
+		"Bash(gh stack 'vi\\\new' --json)",
+	]) {
+		test(`preserves argument values when checking deny ${rule}`, async () => {
+			const cwd = createProject([]);
+			writePiPermissions(cwd, { deny: [rule] });
+			const { result, selectCalls } = await invoke("gh stack view --json", cwd);
+			assert.equal(result, undefined);
+			assert.deepEqual(selectCalls, []);
+		});
+	}
 });
 
 describe("safe signing, documentation, GitHub kit, and OpenSSL inspection", () => {
