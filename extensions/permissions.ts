@@ -766,6 +766,34 @@ function isReadOnlyManCommand(words: string[]): boolean {
 	);
 }
 
+function isReadOnlyGhStackCommand(words: string[]): boolean {
+	if (words[0] !== "gh" || words[1] !== "stack") return false;
+	const args = words.slice(2);
+	if (args.length === 0) return true;
+	if (
+		args.length === 1 &&
+		["--help", "-h", "--version", "-v"].includes(args[0])
+	)
+		return true;
+	if (args[0] === "help")
+		return args.slice(1).every((word) => /^[a-z][a-z-]*$/.test(word));
+	if (
+		args.length === 2 &&
+		/^[a-z][a-z-]*$/.test(args[0]) &&
+		["--help", "-h"].includes(args[1])
+	)
+		return true;
+	return (
+		args[0] === "view" &&
+		hasOnlyInspectionOptions(
+			args.slice(1),
+			["--json", "--short", "-s"],
+			{},
+			false,
+		)
+	);
+}
+
 function isReadOnlyGhHelpCommand(words: string[]): boolean {
 	return (
 		words[0] === "gh" &&
@@ -1080,6 +1108,7 @@ function isReadOnlyCliCommand(command: string): boolean {
 	);
 	return (
 		isReadOnlyManCommand(words) ||
+		isReadOnlyGhStackCommand(words) ||
 		isReadOnlyGhHelpCommand(words) ||
 		isReadOnlyApiHelpCommand(words) ||
 		isReadOnlyApiCommand(words) ||
@@ -1094,6 +1123,7 @@ function isBlockedGhCommand(words: string[]): boolean {
 	if (resource === undefined || resource.startsWith("-")) return false;
 
 	if (resource === "api") return !isReadOnlyApiCommand(words);
+	if (resource === "stack") return !isReadOnlyGhStackCommand(words);
 
 	const action = words[2];
 	if (action === undefined || action.startsWith("-")) return false;
