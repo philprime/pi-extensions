@@ -167,6 +167,7 @@ const DEFAULT_ALLOW_RULES: string[] = [
 	"gh issue status:*",
 	"gh run view:*",
 	"gh run list:*",
+	"gh run watch:*",
 	"gh release view:*",
 	"gh release list:*",
 	"gh search:*",

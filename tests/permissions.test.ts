@@ -2340,6 +2340,48 @@ test("auto-allows documented GitHub inspection commands", async () => {
 	}
 });
 
+describe("GitHub run watch permissions", () => {
+	beforeEach(() => {
+		vi.stubEnv("HOME", createEmptyProject());
+	});
+	afterEach(() => {
+		vi.unstubAllEnvs();
+	});
+
+	for (const command of [
+		"gh run watch",
+		"gh run watch 123",
+		"gh run watch 123 --exit-status --interval 5 --compact -R owner/repo",
+	]) {
+		test(`automatically allows without a project rule: ${command}`, async () => {
+			const { result, selectCalls } = await invoke(command, createProject([]));
+			assert.equal(result, undefined);
+			assert.deepEqual(selectCalls, []);
+		});
+	}
+
+	test("still prompts for a mutating stage after watching a run", async () => {
+		const { result, selectCalls } = await invoke(
+			"gh run watch 123 --exit-status && gh run rerun 123",
+			createProject([]),
+		);
+		assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+		assert.equal(selectCalls.length, 1);
+		assert.match(selectCalls[0].message, /gh run rerun 123/);
+	});
+
+	test("explicit deny rules override automatic run watch approval", async () => {
+		const cwd = createProject([]);
+		writePiPermissions(cwd, { deny: ["Bash(gh run watch:*)"] });
+		const { result, selectCalls } = await invoke("gh run watch 123", cwd);
+		assert.deepEqual(result, {
+			block: true,
+			reason: 'Bash command matches deny rule "Bash(gh run watch:*)"',
+		});
+		assert.deepEqual(selectCalls, []);
+	});
+});
+
 test("auto-allows documented Sentry inspection commands", async () => {
 	const projectDirectory = createProject([]);
 	for (const command of [
