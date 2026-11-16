@@ -1103,9 +1103,7 @@ function isReadOnlyDeveloperCommand(words: string[]): boolean {
 }
 
 function isReadOnlyCliCommand(command: string): boolean {
-	const words = shellWords(command).map((word) =>
-		word.replace(/^("|')|("|')$/g, ""),
-	);
+	const words = evaluatedShellWords(command);
 	return (
 		isReadOnlyManCommand(words) ||
 		isReadOnlyGhStackCommand(words) ||
@@ -1151,9 +1149,7 @@ function hasShortOption(words: string[], options: string): boolean {
 }
 
 function isBlockedCommand(command: string): boolean {
-	const words = shellWords(command).map((word) =>
-		word.replace(/^("|')|("|')$/g, ""),
-	);
+	const words = evaluatedShellWords(command);
 	const name = words[0];
 	if (name === undefined) return false;
 	if (BLOCKED_FIRST_WORDS.has(name)) return true;
@@ -1444,6 +1440,36 @@ function isAllowedSimpleCommand(
 
 function shellWords(command: string): string[] {
 	return command.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? [];
+}
+
+// Only use after syntax validation: evaluate quoting and line continuations,
+// not expansions, so command classification matches the shell's argument values.
+function evaluatedShellWords(command: string): string[] {
+	const words: string[] = [];
+	let quote: "'" | '"' | undefined;
+	let word: string | undefined;
+	for (let index = 0; index < command.length; index++) {
+		const character = command[index];
+		if (quote === "'") {
+			if (character === "'") quote = undefined;
+			else word += character;
+		} else if (character === "\\" && command[index + 1] === "\n") {
+			index++;
+		} else if (quote === '"') {
+			if (character === '"') quote = undefined;
+			else word += character;
+		} else if (character === "'" || character === '"') {
+			quote = character;
+			word ??= "";
+		} else if (/\s/.test(character)) {
+			if (word !== undefined) words.push(word);
+			word = undefined;
+		} else {
+			word = (word ?? "") + character;
+		}
+	}
+	if (word !== undefined) words.push(word);
+	return words;
 }
 
 function suggestedRule(command: string): string {

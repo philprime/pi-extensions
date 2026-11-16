@@ -2002,6 +2002,11 @@ describe("GitHub stack permissions", () => {
 		"gh stack view -s",
 		"gh stack view --json",
 		"gh stack view --short --json",
+		"g'h' st'a'ck v'ie'w --j's'on",
+		'"g"h "st"a"ck" view --json',
+		"gh ''stack'' view",
+		"gh sta\\\nck view --json",
+		'gh "sta\\\nck" view --json',
 		...[
 			"add",
 			"checkout",
@@ -2065,6 +2070,16 @@ describe("GitHub stack permissions", () => {
 		"gh stack view --json --unknown",
 		"gh stack --version sync",
 		"gh stack sync --prune --help",
+		"gh st'a'ck sync",
+		'gh st"a"ck sync',
+		"g'h' stack sync",
+		'"g"h stack sync',
+		'"gh" "st"a"ck" sync',
+		"gh sta\\\nck sync",
+		'gh "sta\\\nck" sync',
+		"gh stack \"v'ie'w\"",
+		"gh stack 'vi\"ew'",
+		"gh stack view --j's'on --unknown",
 	]) {
 		for (const broadRules of [false, true]) {
 			test(`requires approval${broadRules ? " despite broad rules" : ""}: ${command}`, async () => {
@@ -2074,18 +2089,22 @@ describe("GitHub stack permissions", () => {
 				);
 				assert.deepEqual(result, { block: true, reason: "Blocked by user" });
 				assert.equal(selectCalls.length, 1);
+				assert.equal(
+					selectCalls[0].options.includes("Allow for this session"),
+					false,
+				);
 			});
 		}
 	}
 
 	test("only skips read-only stack stages in compound commands", async () => {
 		const { result, selectCalls } = await invoke(
-			"gh stack view --json | jq . && gh stack sync",
+			"gh stack view --json | jq . && gh st'a'ck sync",
 			createProject(["gh *"]),
 		);
 		assert.deepEqual(result, { block: true, reason: "Blocked by user" });
 		assert.equal(selectCalls.length, 1);
-		assert.match(selectCalls[0].message, /gh stack sync/);
+		assert.match(selectCalls[0].message, /gh st'a'ck sync/);
 	});
 
 	test("allows a pipeline when every stage is read-only", async () => {
