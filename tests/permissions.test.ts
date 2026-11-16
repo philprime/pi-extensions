@@ -1898,7 +1898,6 @@ describe("CLI inspection permissions", () => {
 			"gh api /graphql",
 			"gh api /graphql?query=query",
 			"gh api user -X POST --help",
-			"gh stack --help",
 			"gh api user --hostname example.com",
 			"sentry api issues/123/ --method PUT",
 			'sentry api issues/123/ -d \'{"status":"resolved"}\'',
@@ -1980,6 +1979,203 @@ test("auto-allows git range-diff without a project rule", async () => {
 
 	assert.equal(result, undefined);
 	assert.deepEqual(selectCalls, []);
+});
+
+describe("GitHub stack permissions", () => {
+	beforeEach(() => {
+		vi.stubEnv("HOME", createEmptyProject());
+	});
+	afterEach(() => {
+		vi.unstubAllEnvs();
+	});
+
+	for (const command of [
+		"gh stack",
+		"gh stack --help",
+		"gh stack -h",
+		"gh stack --version",
+		"gh stack -v",
+		"gh stack help",
+		"gh stack help sync",
+		"gh stack view",
+		"gh stack view --short",
+		"gh stack view -s",
+		"gh stack view --json",
+		"gh stack view --short --json",
+		"g'h' st'a'ck v'ie'w --j's'on",
+		'"g"h "st"a"ck" view --json',
+		"gh ''stack'' view",
+		"gh sta\\\nck view --json",
+		'gh "sta\\\nck" view --json',
+		...[
+			"add",
+			"checkout",
+			"init",
+			"modify",
+			"unstack",
+			"view",
+			"link",
+			"merge",
+			"push",
+			"rebase",
+			"submit",
+			"sync",
+			"bottom",
+			"down",
+			"switch",
+			"top",
+			"trunk",
+			"up",
+			"alias",
+			"feedback",
+		].flatMap((subcommand) =>
+			["--help", "-h"].map((flag) => `gh stack ${subcommand} ${flag}`),
+		),
+	]) {
+		test(`automatically allows inspection: ${command}`, async () => {
+			const { result, selectCalls } = await invoke(command, createProject([]));
+			assert.equal(result, undefined);
+			assert.deepEqual(selectCalls, []);
+		});
+	}
+
+	for (const command of [
+		"gh stack init topic",
+		"gh stack add topic",
+		"gh stack add -Am 'Commit all changes' topic",
+		"gh stack checkout topic",
+		"gh stack modify",
+		"gh stack unstack",
+		"gh stack unstack --local",
+		"gh stack delete",
+		"gh stack link 41 42",
+		"gh stack merge --yes --squash",
+		"gh stack push",
+		"gh stack rebase",
+		"gh stack rebase --abort",
+		"gh stack submit --auto",
+		"gh stack sync",
+		"gh stack sync --prune",
+		"gh stack bottom",
+		"gh stack down",
+		"gh stack switch",
+		"gh stack top",
+		"gh stack trunk",
+		"gh stack up --print-path",
+		"gh stack alias",
+		"gh stack feedback",
+		"gh stack unknown",
+		"gh stack view --output=stack.json",
+		"gh stack view unexpected-operand",
+		"gh stack view --json --unknown",
+		"gh stack --version sync",
+		"gh stack sync --prune --help",
+		"gh st'a'ck sync",
+		'gh st"a"ck sync',
+		"g'h' stack sync",
+		'"g"h stack sync',
+		'"gh" "st"a"ck" sync',
+		"gh sta\\\nck sync",
+		'gh "sta\\\nck" sync',
+		"gh stack \"v'ie'w\"",
+		"gh stack 'vi\"ew'",
+		"gh stack view --j's'on --unknown",
+	]) {
+		for (const broadRules of [false, true]) {
+			test(`requires approval${broadRules ? " despite broad rules" : ""}: ${command}`, async () => {
+				const { result, selectCalls } = await invoke(
+					command,
+					createProject(broadRules ? ["gh *", "gh stack *"] : []),
+				);
+				assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+				assert.equal(selectCalls.length, 1);
+				assert.equal(
+					selectCalls[0].options.includes("Allow for this session"),
+					false,
+				);
+			});
+		}
+	}
+
+	test("only skips read-only stack stages in compound commands", async () => {
+		const { result, selectCalls } = await invoke(
+			"gh stack view --json | jq . && gh st'a'ck sync",
+			createProject(["gh *"]),
+		);
+		assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+		assert.equal(selectCalls.length, 1);
+		assert.match(selectCalls[0].message, /gh st'a'ck sync/);
+	});
+
+	test("allows a pipeline when every stage is read-only", async () => {
+		const { result, selectCalls } = await invoke(
+			"gh stack view --json | jq .",
+			createProject([]),
+		);
+		assert.equal(result, undefined);
+		assert.deepEqual(selectCalls, []);
+	});
+
+	test("does not allow command substitution in stack inspection", async () => {
+		const { result, selectCalls } = await invoke(
+			"gh stack view $(gh stack sync)",
+			createProject(["gh *"]),
+		);
+		assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+		assert.equal(selectCalls.length, 1);
+	});
+
+	for (const rule of [
+		"Bash(gh stack *)",
+		"Bash(gh stack:*)",
+		"Bash(gh stack view --json)",
+	]) {
+		test(`explicit deny ${rule} overrides equivalent stack inspection`, async () => {
+			const cwd = createProject([]);
+			writePiPermissions(cwd, { deny: [rule] });
+			for (const command of [
+				"gh stack view --json",
+				"gh st'a'ck view --json",
+				"g'h' stack view --json",
+				'"gh" stack view --json',
+				'gh stack "view" --json',
+				"gh stack view --j's'on",
+				"gh sta\\\nck view --json",
+				'gh "sta\\\nck" view --json',
+				"gh stack view --json | jq .",
+				"gh st'a'ck view --json | jq .",
+				"gh st'a'ck view --json > /tmp/stack.json",
+			]) {
+				const { result, selectCalls } = await invoke(command, cwd);
+				assert.equal(
+					(result as { block: boolean } | undefined)?.block,
+					true,
+					command,
+				);
+				assert.match(
+					(result as { reason: string }).reason,
+					/matches deny rule/,
+					command,
+				);
+				assert.deepEqual(selectCalls, [], command);
+			}
+		});
+	}
+
+	for (const rule of [
+		"Bash(gh 'stack view' --json)",
+		"Bash(gh stack view --json '')",
+		"Bash(gh stack 'vi\"ew' --json)",
+		"Bash(gh stack 'vi\\\new' --json)",
+	]) {
+		test(`preserves argument values when checking deny ${rule}`, async () => {
+			const cwd = createProject([]);
+			writePiPermissions(cwd, { deny: [rule] });
+			const { result, selectCalls } = await invoke("gh stack view --json", cwd);
+			assert.equal(result, undefined);
+			assert.deepEqual(selectCalls, []);
+		});
+	}
 });
 
 describe("safe signing, documentation, GitHub kit, and OpenSSL inspection", () => {

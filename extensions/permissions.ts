@@ -767,6 +767,34 @@ function isReadOnlyManCommand(words: string[]): boolean {
 	);
 }
 
+function isReadOnlyGhStackCommand(words: string[]): boolean {
+	if (words[0] !== "gh" || words[1] !== "stack") return false;
+	const args = words.slice(2);
+	if (args.length === 0) return true;
+	if (
+		args.length === 1 &&
+		["--help", "-h", "--version", "-v"].includes(args[0])
+	)
+		return true;
+	if (args[0] === "help")
+		return args.slice(1).every((word) => /^[a-z][a-z-]*$/.test(word));
+	if (
+		args.length === 2 &&
+		/^[a-z][a-z-]*$/.test(args[0]) &&
+		["--help", "-h"].includes(args[1])
+	)
+		return true;
+	return (
+		args[0] === "view" &&
+		hasOnlyInspectionOptions(
+			args.slice(1),
+			["--json", "--short", "-s"],
+			{},
+			false,
+		)
+	);
+}
+
 function isReadOnlyGhHelpCommand(words: string[]): boolean {
 	return (
 		words[0] === "gh" &&
@@ -1076,11 +1104,10 @@ function isReadOnlyDeveloperCommand(words: string[]): boolean {
 }
 
 function isReadOnlyCliCommand(command: string): boolean {
-	const words = shellWords(command).map((word) =>
-		word.replace(/^("|')|("|')$/g, ""),
-	);
+	const words = evaluatedShellWords(command);
 	return (
 		isReadOnlyManCommand(words) ||
+		isReadOnlyGhStackCommand(words) ||
 		isReadOnlyGhHelpCommand(words) ||
 		isReadOnlyApiHelpCommand(words) ||
 		isReadOnlyApiCommand(words) ||
@@ -1095,6 +1122,7 @@ function isBlockedGhCommand(words: string[]): boolean {
 	if (resource === undefined || resource.startsWith("-")) return false;
 
 	if (resource === "api") return !isReadOnlyApiCommand(words);
+	if (resource === "stack") return !isReadOnlyGhStackCommand(words);
 
 	const action = words[2];
 	if (action === undefined || action.startsWith("-")) return false;
@@ -1122,9 +1150,7 @@ function hasShortOption(words: string[], options: string): boolean {
 }
 
 function isBlockedCommand(command: string): boolean {
-	const words = shellWords(command).map((word) =>
-		word.replace(/^("|')|("|')$/g, ""),
-	);
+	const words = evaluatedShellWords(command);
 	const name = words[0];
 	if (name === undefined) return false;
 	if (BLOCKED_FIRST_WORDS.has(name)) return true;
@@ -1417,6 +1443,53 @@ function shellWords(command: string): string[] {
 	return command.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? [];
 }
 
+// Only use after syntax validation: evaluate quoting and line continuations,
+// not expansions, so command classification matches the shell's argument values.
+function evaluatedShellWords(command: string): string[] {
+	const words: string[] = [];
+	let quote: "'" | '"' | undefined;
+	let word: string | undefined;
+	for (let index = 0; index < command.length; index++) {
+		const character = command[index];
+		if (quote === "'") {
+			if (character === "'") quote = undefined;
+			else word += character;
+		} else if (character === "\\" && command[index + 1] === "\n") {
+			index++;
+		} else if (quote === '"') {
+			if (character === '"') quote = undefined;
+			else word += character;
+		} else if (character === "'" || character === '"') {
+			quote = character;
+			word ??= "";
+		} else if (/\s/.test(character)) {
+			if (word !== undefined) words.push(word);
+			word = undefined;
+		} else {
+			word = (word ?? "") + character;
+		}
+	}
+	if (word !== undefined) words.push(word);
+	return words;
+}
+
+function commandMatchesEvaluatedRule(command: string, rule: string): boolean {
+	const isPrefix = rule.endsWith(":*") || rule.endsWith(" *");
+	const ruleCommand = isPrefix ? rule.slice(0, -2) : rule;
+	if (splitShellCommands(ruleCommand)?.length !== 1) return false;
+
+	// Serialize each argument so quoted spaces, empty arguments, and literal
+	// quotes cannot be confused with different argument boundaries or values.
+	const serializeWords = (value: string) =>
+		evaluatedShellWords(value)
+			.map((word) => JSON.stringify(word))
+			.join(" ");
+	return commandMatchesRule(
+		serializeWords(command),
+		serializeWords(ruleCommand) + (isPrefix ? ":*" : ""),
+	);
+}
+
 function suggestedRule(command: string): string {
 	const words = shellWords(command);
 	if (words.length >= 3) return `${words.slice(0, 3).join(" ")} *`;
@@ -1511,7 +1584,9 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 				return (
 					commandMatchesRule(candidate, rule) ||
 					(executableCommand !== undefined &&
-						commandMatchesRule(executableCommand, rule))
+						(commandMatchesRule(executableCommand, rule) ||
+							(commands !== undefined &&
+								commandMatchesEvaluatedRule(executableCommand, rule))))
 				);
 			}),
 		);
