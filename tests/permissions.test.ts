@@ -1982,6 +1982,178 @@ test("auto-allows git range-diff without a project rule", async () => {
 	assert.deepEqual(selectCalls, []);
 });
 
+describe("safe signing, documentation, GitHub kit, and OpenSSL inspection", () => {
+	beforeEach(() => {
+		vi.stubEnv("HOME", createEmptyProject());
+	});
+	afterEach(() => {
+		vi.unstubAllEnvs();
+	});
+
+	for (const command of [
+		"codesign --help",
+		"codesign -dv --verbose=4 'Example App.app'",
+		"codesign -dvvv App.app",
+		"codesign -vv --deep --strict App.app",
+		"codesign --verify --verbose App.app",
+		"codesign --display --entitlements :- App.app",
+		"codesign -d --entitlements - --xml App.app",
+		"codesign -d --entitlements=- App.app",
+		"codesign -d -r- App.app",
+		"codesign --display --requirements - --file-list - App.app",
+		"codesign --hosting 123",
+		"codesign --validate-constraint constraint.plist",
+		"security help find-generic-password",
+		"security find-identity -v -p codesigning",
+		"security find-certificate -a -c 'Apple Development' -p",
+		"security list-keychains",
+		"security list-keychains -d user",
+		"security default-keychain -d system",
+		"security login-keychain",
+		"security show-keychain-info login.keychain-db",
+		"security dump-trust-settings -d",
+		"security list-smartcards",
+		"security error -25300",
+		"apple-docs --help",
+		"apple-docs --version",
+		"apple-docs help cache clean",
+		"apple-docs technologies list --agent",
+		"apple-docs types list --technology Foundation --agent",
+		"apple-docs types search URLSession --technology Foundation --agent",
+		"apple-docs types view URLSession --technology Foundation --agent --json",
+		"apple-docs agent skills list",
+		"apple-docs agent skills get apple-docs",
+		"gh kit --help",
+		"gh kit help workflows rerun",
+		"gh kit pr comments --pr 123 -R owner/repo",
+		"gh kit workflows logs --job 123 -R owner/repo",
+		"gh kit agent skills list",
+		"gh kit agent skills get gh-kit",
+		"openssl help",
+		"openssl version -a",
+		"openssl x509 -help",
+		"openssl x509 -in cert.pem -noout -text",
+		"openssl x509 -inform DER -in cert.der -noout -subject -issuer -dates",
+		"openssl x509 -in cert.pem -noout -fingerprint -sha256",
+		"openssl x509 -in cert.pem -checkend 86400 -noout",
+		"openssl x509 -in cert.pem -pubkey -noout",
+		"openssl dgst -sha256 archive.zip",
+		"openssl dgst -sha512 -verify public.pem -signature signature.bin archive.zip",
+		"openssl verify -CAfile ca.pem -untrusted intermediate.pem cert.pem",
+		"openssl x509 -in cert.pem -noout -subject | openssl dgst -sha256",
+	]) {
+		test(`automatically allows inspection: ${command}`, async () => {
+			const { result, selectCalls } = await invoke(command, createProject([]));
+			assert.equal(result, undefined);
+			assert.deepEqual(selectCalls, []);
+		});
+	}
+
+	for (const command of [
+		"codesign --sign - App.app",
+		"codesign -dvs- App.app",
+		"codesign -d --sign=- App.app",
+		"codesign --remove-signature App.app",
+		"codesign -d --entitlements output.plist App.app",
+		"codesign -d --entitlements=- --entitlements=output.plist App.app",
+		"codesign -d --requirements output.txt App.app",
+		"codesign -d -routput.txt App.app",
+		"codesign -d --extract-certificates App.app",
+		"codesign -d --extract-certificates=cert App.app",
+		"codesign -d --file-list output.txt App.app",
+		"codesign -d --output-detached-certificates certs.bin App.app",
+		"codesign -d --entitle=output.plist App.app",
+		"codesign -d -'s' - App.app",
+		"security list-keychains -s login.keychain-db",
+		"security list-keychains -ds user login.keychain-db",
+		"security default-keychain -s login.keychain-db",
+		"security login-keychain -s login.keychain-db",
+		"security find-generic-password -s service -w",
+		"security find-internet-password -s example.com -g",
+		"security dump-keychain -d",
+		"security export -t privKeys",
+		"security unlock-keychain login.keychain-db",
+		"security delete-certificate -c name",
+		"security authorizationdb write system.login.console allow",
+		"security -i",
+		"apple-docs cache clean",
+		"apple-docs agent skills install --all",
+		"apple-docs agent skills uninstall --all --yes",
+		"gh kit workflows rerun --failed --pr 123",
+		"gh kit workflows cancel-all --pr 123",
+		"gh kit agent skills install --all",
+		"gh kit agent skills uninstall --all --yes",
+		"openssl genrsa -out private.pem 2048",
+		"openssl rsa -in private.pem -text",
+		"openssl pkey -in private.pem -text",
+		"openssl pkcs12 -in bundle.p12 -nodes",
+		"openssl dgst -sha256 -out digest.txt archive.zip",
+		"openssl dgst -sha256 -sign private.pem archive.zip",
+		"openssl dgst -sha256 -writerand random.bin archive.zip",
+		"openssl dgst -sha256 -engine custom archive.zip",
+		"openssl x509 -in cert.pem -out output.pem",
+		"openssl x509 -in cert.pem -signkey private.pem",
+		"openssl x509 -in cert.pem -CA ca.pem -CAcreateserial",
+		"openssl x509 -in cert.pem -provider ./custom.dylib",
+		"openssl verify -provider-path . cert.pem",
+		"openssl req -new -newkey rsa:2048 -keyout private.pem",
+		"openssl s_client -connect example.com:443",
+	]) {
+		for (const broadRules of [false, true]) {
+			test(`requires approval${broadRules ? " despite broad rules" : ""}: ${command}`, async () => {
+				const cwd = createProject(
+					broadRules
+						? [
+								"codesign *",
+								"security *",
+								"apple-docs *",
+								"gh kit *",
+								"openssl *",
+							]
+						: [],
+				);
+				const { result, selectCalls } = await invoke(command, cwd);
+				assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+				assert.equal(selectCalls.length, 1);
+			});
+		}
+	}
+
+	test("only skips approved inspection stages in compound commands", async () => {
+		const { result, selectCalls } = await invoke(
+			"gh kit pr comments --pr 123 && gh kit workflows rerun --failed --pr 123",
+			createProject([]),
+		);
+		assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+		assert.equal(selectCalls.length, 1);
+		assert.match(selectCalls[0].message, /gh kit workflows rerun/);
+	});
+
+	test("explicit denies override the new inspection variants", async () => {
+		const cwd = createProject([]);
+		writePiPermissions(cwd, {
+			deny: [
+				"Bash(codesign *)",
+				"Bash(security *)",
+				"Bash(apple-docs *)",
+				"Bash(gh kit *)",
+				"Bash(openssl *)",
+			],
+		});
+		for (const command of [
+			"codesign -dv App.app",
+			"security find-identity -v",
+			"apple-docs technologies list --agent",
+			"gh kit pr comments --pr 123",
+			"openssl x509 -in cert.pem -noout -text",
+		]) {
+			const { result, selectCalls } = await invoke(command, cwd);
+			assert.equal((result as { block: boolean }).block, true);
+			assert.deepEqual(selectCalls, []);
+		}
+	});
+});
+
 test("auto-allows Sentry docs without a project rule", async () => {
 	const projectDirectory = createProject([]);
 

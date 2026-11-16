@@ -4,10 +4,34 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
+const RESEARCH_CLI_ALLOW_RULES = [
+	"apple-docs --help",
+	"apple-docs -h",
+	"apple-docs --version",
+	"apple-docs help:*",
+	"apple-docs technologies list:*",
+	"apple-docs types list:*",
+	"apple-docs types search:*",
+	"apple-docs types view:*",
+	"apple-docs agent skills list:*",
+	"apple-docs agent skills get:*",
+	"gh kit --help",
+	"gh kit help:*",
+	"gh kit pr --help",
+	"gh kit workflows --help",
+	"gh kit agent --help",
+	"gh kit agent skills --help",
+	"gh kit pr comments:*",
+	"gh kit workflows logs:*",
+	"gh kit agent skills list:*",
+	"gh kit agent skills get:*",
+];
+
 // Built-in low-risk commands that are always safe to run automatically,
 // even without a project allow rule. Keep this list free of any command that
 // can mutate the working tree, delete data, or publish information.
 const DEFAULT_ALLOW_RULES: string[] = [
+	...RESEARCH_CLI_ALLOW_RULES,
 	// File and directory inspection
 	"cat:*",
 	"head:*",
@@ -815,6 +839,241 @@ function isReadOnlyApiCommand(words: string[]): boolean {
 	);
 }
 
+// Reject unknown options, including provider/engine loading and output paths.
+// Values are consumed here so a filename cannot masquerade as another option.
+function hasOnlyInspectionOptions(
+	words: string[],
+	flags: string[],
+	valueOptions: Record<string, readonly string[] | null>,
+	allowOperands = true,
+): boolean {
+	for (let index = 0; index < words.length; index++) {
+		const word = words[index];
+		if (flags.includes(word)) continue;
+		if (!word.startsWith("-")) {
+			if (!allowOperands) return false;
+			continue;
+		}
+		const equalsIndex = word.indexOf("=");
+		const option = equalsIndex < 0 ? word : word.slice(0, equalsIndex);
+		if (!Object.hasOwn(valueOptions, option)) return false;
+		const value =
+			equalsIndex < 0 ? words[++index] : word.slice(equalsIndex + 1);
+		const allowedValues = valueOptions[option];
+		if (
+			!value ||
+			(allowedValues ? !allowedValues.includes(value) : value.startsWith("-"))
+		)
+			return false;
+	}
+	return true;
+}
+
+function isReadOnlyCodesignCommand(words: string[]): boolean {
+	const args = words.slice(1).flatMap((word) => {
+		if (/^-[dvh]+$/.test(word))
+			return [...word.slice(1)].map((flag) => `-${flag}`);
+		if (word === "-r-") return ["-r", "-"];
+		return [word];
+	});
+	if (args.length === 1 && args[0] === "--help") return true;
+	return (
+		args.some((word) =>
+			[
+				"-d",
+				"-v",
+				"-h",
+				"--display",
+				"--verify",
+				"--hosting",
+				"--validate-constraint",
+			].includes(word),
+		) &&
+		hasOnlyInspectionOptions(
+			args,
+			[
+				"-d",
+				"-v",
+				"-h",
+				"--display",
+				"--verify",
+				"--hosting",
+				"--validate-constraint",
+				"--verbose",
+				"--deep",
+				"--strict",
+				"--all-architectures",
+				"--continue",
+				"--xml",
+				"--der",
+			],
+			{
+				"--verbose": ["0", "1", "2", "3", "4", "5", "6"],
+				"--strict": null,
+				"-a": null,
+				"--architecture": null,
+				"--bundle-version": null,
+				"-R": null,
+				"--test-requirement": null,
+				"-r": ["-"],
+				"--requirements": ["-"],
+				"--entitlements": ["-", ":-"],
+				"--file-list": ["-"],
+			},
+		)
+	);
+}
+
+function isReadOnlySecurityCommand(words: string[]): boolean {
+	const args = words.slice(2);
+	switch (words[1]) {
+		case "help":
+			return args.every((word) => /^[a-z][a-z-]*$/.test(word));
+		case "list-keychains":
+		case "default-keychain":
+		case "login-keychain":
+			return hasOnlyInspectionOptions(
+				args,
+				["-h"],
+				{ "-d": ["user", "system", "common", "dynamic"] },
+				false,
+			);
+		case "find-identity":
+			return hasOnlyInspectionOptions(args, ["-h", "-v"], {
+				"-p": null,
+				"-s": null,
+			});
+		case "find-certificate":
+			return hasOnlyInspectionOptions(args, ["-h", "-a", "-m", "-p", "-Z"], {
+				"-c": null,
+				"-e": null,
+			});
+		case "show-keychain-info":
+			return hasOnlyInspectionOptions(args, [], {});
+		case "dump-trust-settings":
+			return hasOnlyInspectionOptions(args, ["-s", "-d", "-h"], {}, false);
+		case "list-smartcards":
+			return args.length === 0;
+		case "error":
+			return args.length > 0 && args.every((word) => /^-?\d+$/.test(word));
+		default:
+			return false;
+	}
+}
+
+function isReadOnlyOpenSSLCommand(words: string[]): boolean {
+	const args = words.slice(2);
+	const digests = [
+		"-md5",
+		"-sha1",
+		"-sha224",
+		"-sha256",
+		"-sha384",
+		"-sha512",
+		"-sha3-256",
+		"-sha3-512",
+	];
+	if (words[1] === "help") return args.length === 0;
+	if (
+		["version", "x509", "dgst", "verify"].includes(words[1]) &&
+		args.length === 1 &&
+		args[0] === "-help"
+	)
+		return true;
+	switch (words[1]) {
+		case "version":
+			return hasOnlyInspectionOptions(
+				args,
+				["-a", "-v", "-b", "-o", "-f", "-p", "-d", "-e", "-m", "-r"],
+				{},
+				false,
+			);
+		case "x509":
+			return hasOnlyInspectionOptions(
+				args,
+				[
+					"-noout",
+					"-text",
+					"-fingerprint",
+					"-serial",
+					"-subject",
+					"-issuer",
+					"-dates",
+					"-startdate",
+					"-enddate",
+					"-email",
+					"-hash",
+					"-subject_hash",
+					"-issuer_hash",
+					"-pubkey",
+					"-modulus",
+					"-purpose",
+					"-ocsp_uri",
+					...digests,
+				],
+				{
+					"-in": null,
+					"-inform": ["PEM", "DER"],
+					"-nameopt": null,
+					"-certopt": null,
+					"-ext": null,
+					"-checkend": null,
+					"-checkhost": null,
+					"-checkemail": null,
+					"-checkip": null,
+				},
+				false,
+			);
+		case "dgst":
+			return hasOnlyInspectionOptions(
+				args,
+				["-list", "-c", "-r", "-hex", "-binary", ...digests],
+				{ "-verify": null, "-signature": null, "-keyform": ["PEM", "DER"] },
+			);
+		case "verify":
+			return hasOnlyInspectionOptions(
+				args,
+				[
+					"-verbose",
+					"-show_chain",
+					"-no-CAfile",
+					"-no-CApath",
+					"-no-CAstore",
+					"-x509_strict",
+					"-crl_check",
+					"-crl_check_all",
+					"-check_ss_sig",
+					"-trusted_first",
+					"-partial_chain",
+				],
+				{
+					"-CAfile": null,
+					"-CApath": null,
+					"-trusted": null,
+					"-untrusted": null,
+					"-CRLfile": null,
+					"-purpose": null,
+					"-verify_hostname": null,
+					"-verify_email": null,
+					"-verify_ip": null,
+					"-verify_depth": null,
+					"-auth_level": null,
+					"-attime": null,
+				},
+			);
+		default:
+			return false;
+	}
+}
+
+function isReadOnlyDeveloperCommand(words: string[]): boolean {
+	if (words.some((word) => /[$`\\\\"'*?[\]{}~]/.test(word))) return false;
+	if (words[0] === "codesign") return isReadOnlyCodesignCommand(words);
+	if (words[0] === "security") return isReadOnlySecurityCommand(words);
+	if (words[0] === "openssl") return isReadOnlyOpenSSLCommand(words);
+	return false;
+}
+
 function isReadOnlyCliCommand(command: string): boolean {
 	const words = shellWords(command).map((word) =>
 		word.replace(/^("|')|("|')$/g, ""),
@@ -823,7 +1082,8 @@ function isReadOnlyCliCommand(command: string): boolean {
 		isReadOnlyManCommand(words) ||
 		isReadOnlyGhHelpCommand(words) ||
 		isReadOnlyApiHelpCommand(words) ||
-		isReadOnlyApiCommand(words)
+		isReadOnlyApiCommand(words) ||
+		isReadOnlyDeveloperCommand(words)
 	);
 }
 
@@ -867,6 +1127,14 @@ function isBlockedCommand(command: string): boolean {
 	const name = words[0];
 	if (name === undefined) return false;
 	if (BLOCKED_FIRST_WORDS.has(name)) return true;
+	if (["codesign", "security", "openssl"].includes(name)) {
+		return !isReadOnlyDeveloperCommand(words);
+	}
+	if (name === "apple-docs" || (name === "gh" && words[1] === "kit")) {
+		return !RESEARCH_CLI_ALLOW_RULES.some((rule) =>
+			commandMatchesRule(command, rule),
+		);
+	}
 	if (name === "man") return !isReadOnlyManCommand(words);
 	if (name === "find") {
 		return words
