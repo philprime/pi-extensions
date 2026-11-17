@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { backgroundJobCommand } from "./run.ts";
 
 const RESEARCH_CLI_ALLOW_RULES = [
 	"apple-docs --help",
@@ -1565,20 +1566,36 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 	pi.on("session_shutdown", resetSessionApprovals);
 
 	pi.on("tool_call", async (event, ctx) => {
-		if (event.toolName !== "bash") return undefined;
+		if (event.toolName !== "bash" && event.toolName !== "background")
+			return undefined;
 
-		const approvals = sessionApprovals;
-		let sessionRules = approvals.get(ctx.cwd);
-		if (!sessionRules) {
-			sessionRules = new Set();
-			approvals.set(ctx.cwd, sessionRules);
+		let cwd = ctx.cwd;
+		let input = event.input as {
+			action?: unknown;
+			name?: unknown;
+			command?: unknown;
+			description?: unknown;
+		};
+		if (event.toolName === "background") {
+			if (input.action === "restart") {
+				const job = backgroundJobCommand(String(input.name ?? ""));
+				cwd = job.cwd;
+				input = { command: job.command };
+			} else if (input.action !== "start") {
+				return undefined;
+			}
 		}
 
-		const input = event.input as { command?: unknown; description?: unknown };
+		const approvals = sessionApprovals;
+		let sessionRules = approvals.get(cwd);
+		if (!sessionRules) {
+			sessionRules = new Set();
+			approvals.set(cwd, sessionRules);
+		}
 		const command = String(input.command ?? "");
 		const commands = splitShellCommands(command);
 		const commandCandidates = commands?.length ? commands : [command];
-		const deniedRule = bashDenyRules(ctx.cwd).find((rule) =>
+		const deniedRule = bashDenyRules(cwd).find((rule) =>
 			commandCandidates.some((candidate) => {
 				const executableCommand = parseOutputRedirections(candidate)?.command;
 				return (
@@ -1597,11 +1614,11 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 			};
 		}
 
-		const rules = bashAllowRules(ctx.cwd);
+		const rules = bashAllowRules(cwd);
 		if (
 			commands?.length &&
 			commands.every((commandToCheck) =>
-				isAllowedSimpleCommand(commandToCheck, rules, ctx.cwd, sessionRules),
+				isAllowedSimpleCommand(commandToCheck, rules, cwd, sessionRules),
 			)
 		)
 			return undefined;
@@ -1626,16 +1643,11 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 			for (const commandToApprove of commandsToApprove) {
 				// Check at execution time so earlier approvals also cover queued calls
 				// and repeated stages within this command.
-				if (
-					isAllowedSimpleCommand(commandToApprove, rules, ctx.cwd, sessionRules)
-				)
+				if (isAllowedSimpleCommand(commandToApprove, rules, cwd, sessionRules))
 					continue;
 				// Only offer saved rules for commands whose syntax and output paths
 				// passed validation. Save the executable command, not its redirections.
-				const parsedCommand = parsedSimpleShellCommand(
-					commandToApprove,
-					ctx.cwd,
-				);
+				const parsedCommand = parsedSimpleShellCommand(commandToApprove, cwd);
 				const amendable = parsedCommand !== undefined;
 				const sessionApprovable =
 					parsedCommand !== undefined &&
@@ -1681,7 +1693,7 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 					}
 
 					try {
-						const settingsPath = appendLocalBashRule(ctx.cwd, editedRule);
+						const settingsPath = appendLocalBashRule(cwd, editedRule);
 						ctx.ui.notify(
 							`Saved ${normalizeBashRule(editedRule)} to ${settingsPath}`,
 							"info",
