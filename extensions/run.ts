@@ -17,11 +17,11 @@ type Job = {
 	output: string;
 	exitCode?: number | null;
 };
-type Manager = { jobs: Map<string, Job>; epoch: number };
+type Manager = { jobs: Map<string, Job> };
 
 function manager(): Manager {
 	const state = globalThis as typeof globalThis & { [KEY]?: Manager };
-	if (!state[KEY]) state[KEY] = { jobs: new Map(), epoch: 0 };
+	if (!state[KEY]) state[KEY] = { jobs: new Map() };
 	return state[KEY];
 }
 
@@ -97,6 +97,13 @@ function get(name: string): Job {
 	return job;
 }
 
+export function backgroundJobCommand(
+	name: string,
+): Pick<Job, "command" | "cwd"> {
+	const { command, cwd } = get(name);
+	return { command, cwd };
+}
+
 async function perform(
 	action: string,
 	name?: string,
@@ -159,7 +166,6 @@ async function perform(
 export default function runExtension(pi: ExtensionAPI): void {
 	pi.on("session_shutdown", async (event) => {
 		if (event.reason !== "quit") return;
-		manager().epoch++;
 		const jobs = [...registry().values()];
 		await Promise.all(jobs.map(terminate));
 		registry().clear();
@@ -184,12 +190,12 @@ export default function runExtension(pi: ExtensionAPI): void {
 		name: "background",
 		label: "Background Jobs",
 		description:
-			"Start, list, inspect recent logs, restart or stop named background shell jobs. Jobs stop when Pi exits. Starting or restarting needs user approval.",
+			"Start, list, inspect recent logs, restart or stop named background shell jobs. Jobs stop when Pi exits. Starting or restarting uses Bash permission rules.",
 		promptSnippet:
 			"Run long-running development commands as managed background jobs with inspectable logs.",
 		promptGuidelines: [
 			"Use background rather than bash for intentionally long-running commands such as development servers and watchers. Do not launch them with shell backgrounding, nohup, or detached processes. Use bash for ordinary commands that finish on their own.",
-			"Give each job a descriptive name. Use background list and logs to check its state and recent output, restart to relaunch it, and stop when it is no longer needed. Starting or restarting through this tool asks the user for approval.",
+			"Give each job a descriptive name. Use background list and logs to check its state and recent output, restart to relaunch it, and stop when it is no longer needed. Starting or restarting through this tool uses the same permission rules and approval flow as bash.",
 		],
 		parameters: Type.Object({
 			action: Type.Unsafe<"start" | "list" | "logs" | "restart" | "stop">({
@@ -205,25 +211,7 @@ export default function runExtension(pi: ExtensionAPI): void {
 		}),
 		async execute(_id, { action, name, command }, signal, _onUpdate, ctx) {
 			try {
-				const epoch = manager().epoch;
 				signal?.throwIfAborted();
-				if (action === "start" || action === "restart") {
-					const requested =
-						action === "restart" && name ? get(name).command : command;
-					if (!requested?.trim()) throw new Error("A command is required.");
-					if (
-						!ctx.hasUI ||
-						!(await ctx.ui.confirm(
-							"Run background command?",
-							`${action} ${name ?? ""} in ${ctx.cwd}:\n${requested}`,
-						))
-					) {
-						throw new Error("Background command was not approved.");
-					}
-					signal?.throwIfAborted();
-					if (manager().epoch !== epoch)
-						throw new Error("Pi exited during background command approval.");
-				}
 				return {
 					content: [
 						{
