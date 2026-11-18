@@ -46,12 +46,16 @@ Use `ctx.hasUI` before dialogs and notifications. Extensions also run in print a
 
 ## Permission Extension Rules
 
-`extensions/permissions.ts` reads Bash allow and deny rules from:
+`extensions/permissions.ts` reads permission rules from:
 
 - `~/.pi/agent/permissions.json` and `permissions.local.json`
 - The nearest ancestor `.pi/permissions.json` and `.pi/permissions.local.json`, resolved independently
 
 New rules are saved to the nearest ancestor `.pi/permissions.local.json`, or to that path in the current working directory when none exists.
+
+Use `Bash(<command>)` for Bash command patterns and `MCP(<tool-name>)` for MCP tool-name patterns. MCP names are fully qualified, such as `MCP(mcp__example__get_item)`, or resource tool names such as `MCP(read_mcp_resource)`. A `*` matches any sequence of characters, so `MCP(mcp__example__get_*)` covers that server's `get_` tools.
+
+MCP rules are evaluated in `deny`, `ask`, then `allow` order. An ask rule requires approval on every call. Unmatched calls require approval, and calls that require approval are blocked without a UI. Direct and nested calls use the same gate. Bash and MCP session approvals remain separate and are scoped to the working directory.
 
 Keep the permission boundary fail-closed:
 
