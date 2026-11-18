@@ -320,34 +320,20 @@ function readBashRules(filePath: string, kind: "allow" | "deny"): string[] {
 	}
 }
 
-function findProjectFile(
+function findProjectPermissions(
 	cwd: string,
-	...relativePath: string[]
+	fileName = "permissions.json",
 ): string | undefined {
 	let current = path.resolve(cwd);
 
 	while (true) {
-		const candidate = path.join(current, ...relativePath);
+		const candidate = path.join(current, ".pi", fileName);
 		if (fs.existsSync(candidate)) return candidate;
 
 		const parent = path.dirname(current);
 		if (parent === current) return undefined;
 		current = parent;
 	}
-}
-
-function findProjectSettings(
-	cwd: string,
-	fileName = "settings.local.json",
-): string | undefined {
-	return findProjectFile(cwd, ".claude", fileName);
-}
-
-function findProjectPermissions(
-	cwd: string,
-	fileName = "permissions.json",
-): string | undefined {
-	return findProjectFile(cwd, ".pi", fileName);
 }
 
 function localPermissionsPath(cwd: string): string {
@@ -360,16 +346,12 @@ function localPermissionsPath(cwd: string): string {
 function permissionPaths(cwd: string): string[] {
 	const home = os.homedir();
 	const projectPaths = [
-		findProjectSettings(cwd, "settings.json"),
-		findProjectSettings(cwd),
 		findProjectPermissions(cwd),
 		findProjectPermissions(cwd, "permissions.local.json"),
 	].filter((filePath): filePath is string => filePath !== undefined);
 
 	return [
 		...new Set([
-			path.join(home, ".claude", "settings.json"),
-			path.join(home, ".claude", "settings.local.json"),
 			path.join(home, ".pi", "agent", "permissions.json"),
 			path.join(home, ".pi", "agent", "permissions.local.json"),
 			...projectPaths,

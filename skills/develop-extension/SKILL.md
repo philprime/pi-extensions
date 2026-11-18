@@ -46,12 +46,12 @@ Use `ctx.hasUI` before dialogs and notifications. Extensions also run in print a
 
 ## Permission Extension Rules
 
-`extensions/permissions.ts` reads Bash allow rules from:
+`extensions/permissions.ts` reads Bash allow and deny rules from:
 
-- `~/.claude/settings.local.json`
-- The nearest ancestor `.claude/settings.local.json`
+- `~/.pi/agent/permissions.json` and `permissions.local.json`
+- The nearest ancestor `.pi/permissions.json` and `.pi/permissions.local.json`, resolved independently
 
-It does not read project `.claude/settings.json`. Verify intended configuration sources before changing this behavior.
+New rules are saved to the nearest ancestor `.pi/permissions.local.json`, or to that path in the current working directory when none exists.
 
 Keep the permission boundary fail-closed:
 
