@@ -1175,14 +1175,16 @@ function isBlockedCommand(command: string): boolean {
 			);
 	}
 	if (name === "sed") {
-		// Only the simple print-address form is safe to auto-approve. Sed
-		// scripts can also execute commands or write files without -i.
 		const args = words.slice(1).filter((word) => word !== "-n");
-		return (
-			args.length < 1 ||
-			!/^\d+(,\d+)?p$/.test(args[0]) ||
-			args.slice(1).some((word) => word.startsWith("-"))
-		);
+		if (args[0] === "-E") args.shift();
+		const script = args[0] ?? "";
+		// Limit scripts to numeric prints or one slash-delimited substitution.
+		// Only the optional global flag is allowed, never execution or writes.
+		const isSafeScript =
+			/^\d+(,\d+)?p$/.test(script) ||
+			(!/[\r\n]/.test(script) &&
+				/^s\/(?:[^/\\]|\\.)*\/(?:[^/\\]|\\.)*\/g?$/.test(script));
+		return !isSafeScript || args.slice(1).some((word) => word.startsWith("-"));
 	}
 	const args = words.slice(1);
 	if (name === "rg") {

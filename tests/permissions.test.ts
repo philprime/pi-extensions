@@ -1407,6 +1407,56 @@ test("keeps read-only find, sed, sort and git diff automatically allowed", async
 	}
 });
 
+test("auto-allows single sed substitutions without project allow rules", async () => {
+	const cwd = createEmptyProject();
+	for (const command of [
+		"sed -E 's/[[:alnum:]._%+-]+@[[:alnum:].-]+/[redacted-email]/g'",
+		"cat contacts.txt | sed -E 's/[[:alnum:]._%+-]+@[[:alnum:].-]+/[redacted-email]/g'",
+		"sed 's/old/new/' file.txt",
+		"sed -n -E 's/old/new/g' file.txt",
+		"sed 's/old//' file.txt",
+		"sed 's/old/new;literal/g' file.txt",
+		"sed 's/old/e w output.txt/g' file.txt",
+		String.raw`sed 's/old\/path/new\/path/g' file.txt`,
+		String.raw`sed 's/old/\\/g' file.txt`,
+	]) {
+		const { result, selectCalls } = await invoke(command, cwd);
+		assert.equal(result, undefined, command);
+		assert.deepEqual(selectCalls, [], command);
+	}
+});
+
+test("keeps unsafe and unsupported sed substitutions behind approval", async () => {
+	for (const cwd of [createEmptyProject(), createProject(["sed *"])]) {
+		for (const command of [
+			"sed -i 's/old/new/g' file.txt",
+			"sed -E -i.bak 's/old/new/g' file.txt",
+			"sed -E --in-place 's/old/new/g' file.txt",
+			"sed -E 's/old/new/e' file.txt",
+			"sed -E 's/old/new/ge' file.txt",
+			"sed -E 's/old/new/w output.txt' file.txt",
+			"sed -E 's/old/new/gw output.txt' file.txt",
+			"sed -E 's/old/new/;e id' file.txt",
+			"sed -E 's/old/new/;w output.txt' file.txt",
+			"sed -E 's/old/new/\nw output.txt' file.txt",
+			String.raw`sed -E 's/old/new\
+w output.txt/' file.txt`,
+			"sed -E 's/old/new/g' -e 'e id' file.txt",
+			"sed -E 's/old/new/g' -f script.sed file.txt",
+			"sed -E 's/old/new' file.txt",
+			"sed -E 's/old/new/g' file.txt | custom-tool",
+		]) {
+			const { result, selectCalls } = await invoke(command, cwd);
+			assert.deepEqual(
+				result,
+				{ block: true, reason: "Blocked by user" },
+				command,
+			);
+			assert.equal(selectCalls.length, 1, command);
+		}
+	}
+});
+
 test("allows a non-blocked Git subcommand matching an allow rule", async () => {
 	const projectDirectory = createProject(["git *"]);
 	const { result, selectCalls } = await invoke(
