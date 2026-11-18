@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import type {
 	ExtensionAPI,
@@ -7,31 +10,60 @@ import type {
 	ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { afterEach, test } from "vitest";
+import permissionsExtension from "../extensions/permissions.ts";
 import runExtension from "../extensions/run.ts";
 
+const temporaryDirectories: string[] = [];
+function project(allow: string[] = [], deny: string[] = []) {
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "background-permissions-"));
+	temporaryDirectories.push(cwd);
+	fs.mkdirSync(path.join(cwd, ".pi"));
+	fs.writeFileSync(
+		path.join(cwd, ".pi", "permissions.json"),
+		JSON.stringify({
+			permissions: { allow, deny },
+		}),
+	);
+	return cwd;
+}
+
 const instances: { shutdown(reason: string): Promise<void> }[] = [];
-function extension(hasUI = true, confirm = async () => true) {
+function extension(hasUI = true, select = async () => "Yes", cwd = project()) {
 	const commands = new Map<
 		string,
 		(args: string, ctx: ExtensionCommandContext) => Promise<void>
 	>();
 	const tools = new Map<string, ToolDefinition>();
-	const handlers = new Map<
-		string,
-		(event: { reason: string }, ctx: ExtensionContext) => Promise<void>
-	>();
+	type Handler = (
+		event: {
+			reason?: string;
+			toolName?: string;
+			input?: unknown;
+			parentToolCallId?: string;
+		},
+		ctx: ExtensionContext,
+	) => Promise<{ block?: boolean; reason?: string } | undefined>;
+	const handlers = new Map<string, Handler[]>();
 	const notifications: string[] = [];
+	const prompts: Array<{ message: string; options: string[] }> = [];
 	const ctx = {
-		cwd: process.cwd(),
+		cwd,
 		hasUI,
 		ui: {
+			confirm: async () => (await select()) !== "No",
 			notify(message: string) {
 				notifications.push(message);
 			},
-			confirm,
+			async select(message: string, options: string[]) {
+				prompts.push({ message, options });
+				return select();
+			},
+			async editor(_title: string, initialValue: string) {
+				return initialValue;
+			},
 		},
 	} as unknown as ExtensionCommandContext;
-	runExtension({
+	const api = {
 		registerCommand(name, command) {
 			commands.set(name, command.handler);
 		},
@@ -39,11 +71,17 @@ function extension(hasUI = true, confirm = async () => true) {
 			tools.set(tool.name, tool as unknown as ToolDefinition);
 		},
 		on(name, handler) {
-			handlers.set(name, handler as never);
+			const registered = handlers.get(name) ?? [];
+			registered.push(handler as never);
+			handlers.set(name, registered);
 		},
-	} as ExtensionAPI);
+	} as ExtensionAPI;
+	permissionsExtension(api);
+	runExtension(api);
 	const instance = {
 		notifications,
+		prompts,
+		ctx,
 		guidance() {
 			const tool = tools.get("background");
 			assert.ok(tool);
@@ -57,9 +95,31 @@ function extension(hasUI = true, confirm = async () => true) {
 			assert.ok(handler);
 			await handler(args, ctx);
 		},
-		async tool(action: string, args: Record<string, unknown> = {}) {
+		async tool(
+			action: string,
+			args: Record<string, unknown> = {},
+			parentToolCallId?: string,
+		) {
 			const tool = tools.get("background");
 			assert.ok(tool);
+			for (const handler of handlers.get("tool_call") ?? []) {
+				const approval = await handler(
+					{
+						toolName: "background",
+						input: { action, ...args },
+						parentToolCallId,
+					},
+					ctx,
+				);
+				if (approval?.block)
+					return {
+						content: [
+							{ type: "text" as const, text: approval.reason ?? "Blocked" },
+						],
+						details: {},
+						isError: true,
+					};
+			}
 			const result = await tool.execute(
 				"test",
 				{ action, ...args },
@@ -72,7 +132,8 @@ function extension(hasUI = true, confirm = async () => true) {
 			return { ...result, content: [content] };
 		},
 		async shutdown(reason: string) {
-			await handlers.get("session_shutdown")?.({ reason }, ctx);
+			for (const handler of handlers.get("session_shutdown") ?? [])
+				await handler({ reason }, ctx);
 		},
 	};
 	instances.push(instance);
@@ -81,6 +142,8 @@ function extension(hasUI = true, confirm = async () => true) {
 
 afterEach(async () => {
 	for (const instance of instances.splice(0)) await instance.shutdown("quit");
+	for (const directory of temporaryDirectories.splice(0))
+		fs.rmSync(directory, { recursive: true, force: true });
 });
 
 async function until(check: () => Promise<boolean>, timeout = 3000) {
@@ -216,7 +279,7 @@ test("approved agent starts and restarts share jobs with the command", async () 
 });
 
 test("agent start requires approval and fails closed without UI", async () => {
-	const denied = extension(true, async () => false);
+	const denied = extension(true, async () => "No");
 	const refusal = await denied.tool("start", { name: "web", command: idle });
 	assert.equal(refusal.isError, true);
 	assert.match(
@@ -232,19 +295,152 @@ test("agent start requires approval and fails closed without UI", async () => {
 	);
 });
 
+test("allowlisted background commands start headlessly without prompting", async () => {
+	const pi = extension(
+		false,
+		async () => "No",
+		project(["Bash(printf background-ready)"]),
+	);
+	const result = await pi.tool("start", {
+		name: "allowed",
+		command: "printf background-ready > output.log",
+	});
+	assert.equal(result.isError, undefined);
+	assert.deepEqual(pi.prompts, []);
+	await until(
+		async () =>
+			fs.existsSync(path.join(pi.ctx.cwd, "output.log")) &&
+			fs.readFileSync(path.join(pi.ctx.cwd, "output.log"), "utf8") ===
+				"background-ready",
+	);
+});
+
+test("deny rules block background commands even when normally allowlisted", async () => {
+	const pi = extension(true, async () => "Yes", project([], ["Bash(echo *)"]));
+	const result = await pi.tool("start", {
+		name: "denied",
+		command: "echo denied",
+	});
+	assert.equal(result.isError, true);
+	assert.match(result.content[0].text, /deny rule/);
+	assert.deepEqual(pi.prompts, []);
+	assert.match((await pi.tool("list")).content[0].text, /No background jobs/);
+});
+
+test("background compound commands use the standard per-stage approval UI", async () => {
+	const pi = extension(true, async () => "No");
+	const result = await pi.tool("start", {
+		name: "compound",
+		command: "echo allowed && printf needs-approval",
+	});
+	assert.equal(result.isError, true);
+	assert.equal(pi.prompts.length, 1);
+	assert.match(pi.prompts[0].message, /printf needs-approval/);
+	assert.doesNotMatch(pi.prompts[0].message, /echo allowed/);
+	assert.ok(pi.prompts[0].options.includes("Allow for this session"));
+	assert.ok(
+		pi.prompts[0].options.some((option) =>
+			option.startsWith("Yes, and don’t ask again"),
+		),
+	);
+	assert.match((await pi.tool("list")).content[0].text, /No background jobs/);
+});
+
+test("background starts and restarts share session approvals", async () => {
+	const pi = extension(true, async () => "Allow for this session");
+	assert.equal(
+		(
+			await pi.tool("start", {
+				name: "session",
+				command: "printf session-ready",
+			})
+		).isError,
+		undefined,
+	);
+	assert.equal(
+		(await pi.tool("restart", { name: "session" })).isError,
+		undefined,
+	);
+	assert.equal(pi.prompts.length, 1);
+	assert.equal(
+		fs.existsSync(path.join(pi.ctx.cwd, ".pi", "permissions.local.json")),
+		false,
+	);
+});
+
+test("background approvals can persist standard Bash rules", async () => {
+	const pi = extension();
+	const save = extension(
+		true,
+		async () => {
+			const choice = save.prompts
+				.at(-1)
+				?.options.find((option) =>
+					option.startsWith("Yes, and don’t ask again"),
+				);
+			assert.ok(choice);
+			return choice;
+		},
+		pi.ctx.cwd,
+	);
+	assert.equal(
+		(await save.tool("start", { name: "saved", command: "printf saved-ready" }))
+			.isError,
+		undefined,
+	);
+	const saved = JSON.parse(
+		fs.readFileSync(
+			path.join(pi.ctx.cwd, ".pi", "permissions.local.json"),
+			"utf8",
+		),
+	);
+	assert.deepEqual(saved.permissions.allow, ["Bash(printf saved-ready *)"]);
+	assert.equal(
+		(await pi.tool("restart", { name: "saved" })).isError,
+		undefined,
+	);
+	assert.deepEqual(pi.prompts, []);
+});
+
+test("restart checks the stored command and original directory, not supplied replacements", async () => {
+	const original = project([], ["Bash(printf *)"]);
+	const pi = extension(true, async () => "Yes", original);
+	await pi.command("start original printf original-ready");
+	pi.ctx.cwd = project(["Bash(printf *)"]);
+	const result = await pi.tool("restart", {
+		name: "original",
+		command: "echo harmless",
+	});
+	assert.equal(result.isError, true);
+	assert.match(result.content[0].text, /deny rule/);
+	assert.deepEqual(pi.prompts, []);
+});
+
+test("nested background tool calls use the same permission gate", async () => {
+	const pi = extension(true, async () => "No", project([], ["Bash(echo *)"]));
+	const result = await pi.tool(
+		"start",
+		{ name: "sandbox", command: "echo nested" },
+		"codemode-call",
+	);
+	assert.equal(result.isError, true);
+	assert.match(result.content[0].text, /deny rule/);
+	assert.match((await pi.tool("list")).content[0].text, /No background jobs/);
+});
+
 test("pending agent approval cannot start a job after Pi quits", async () => {
-	let approve: ((value: boolean) => void) | undefined;
+	let approve: ((value: string) => void) | undefined;
 	const pi = extension(
 		true,
 		() =>
-			new Promise<boolean>((resolve) => {
+			new Promise<string>((resolve) => {
 				approve = resolve;
 			}),
 	);
 	const pending = pi.tool("start", { name: "late", command: idle });
 	await until(async () => approve !== undefined);
 	await pi.shutdown("quit");
-	approve?.(true);
+	approve?.("Yes");
 	assert.equal((await pending).isError, true);
 	assert.match(
 		(await pi.tool("list")).content[0]?.text ?? "",
