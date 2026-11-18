@@ -7,7 +7,13 @@ import { afterEach, beforeEach, describe, test, vi } from "vitest";
 import permissionsExtension from "../extensions/permissions.ts";
 
 type ToolCallHandler = (
-	event: { toolName?: string; input?: unknown; reason?: string },
+	event: {
+		toolName?: string;
+		input?: unknown;
+		reason?: string;
+		toolCallId?: string;
+		parentToolCallId?: string;
+	},
 	ctx: unknown,
 ) => Promise<unknown>;
 
@@ -31,7 +37,7 @@ function createProject(allow: string[]): string {
 
 function writePiPermissions(
 	projectDirectory: string,
-	permissions: { allow?: string[]; deny?: string[] },
+	permissions: { allow?: string[]; ask?: string[]; deny?: string[] },
 	fileName = "permissions.json",
 ): string {
 	const settingsDirectory = path.join(projectDirectory, ".pi");
@@ -66,6 +72,22 @@ async function invoke(
 	selectChoices: string[] = ["No"],
 	editedRule?: string | null,
 	handler = createHandler(),
+) {
+	return invokeTool(
+		{ toolName: "bash", input: { command } },
+		cwd,
+		selectChoices,
+		editedRule,
+		handler,
+	);
+}
+
+async function invokeTool(
+	event: Parameters<ToolCallHandler>[0],
+	cwd: string,
+	selectChoices: string[] = ["No"],
+	editedRule?: string | null,
+	handler = createHandler(),
 ): Promise<{
 	result: unknown;
 	selectCalls: Array<{ message: string; options: string[] }>;
@@ -75,26 +97,23 @@ async function invoke(
 	const selectCalls: Array<{ message: string; options: string[] }> = [];
 	const editorCalls: Array<{ title: string; initialValue: string }> = [];
 	const notifications: Array<{ message: string; level: string }> = [];
-	const result = await handler(
-		{ toolName: "bash", input: { command } },
-		{
-			cwd,
-			hasUI: true,
-			ui: {
-				select: async (message: string, options: string[]) => {
-					selectCalls.push({ message, options });
-					return selectChoices.shift();
-				},
-				editor: async (title: string, initialValue: string) => {
-					editorCalls.push({ title, initialValue });
-					return editedRule === null ? undefined : (editedRule ?? initialValue);
-				},
-				notify: (message: string, level: string) => {
-					notifications.push({ message, level });
-				},
+	const result = await handler(event, {
+		cwd,
+		hasUI: true,
+		ui: {
+			select: async (message: string, options: string[]) => {
+				selectCalls.push({ message, options });
+				return selectChoices.shift();
+			},
+			editor: async (title: string, initialValue: string) => {
+				editorCalls.push({ title, initialValue });
+				return editedRule === null ? undefined : (editedRule ?? initialValue);
+			},
+			notify: (message: string, level: string) => {
+				notifications.push({ message, level });
 			},
 		},
-	);
+	});
 	return { result, selectCalls, editorCalls, notifications };
 }
 
@@ -508,6 +527,420 @@ test("allows a simple command matching a Bash allow rule", async () => {
 
 	assert.equal(result, undefined);
 	assert.deepEqual(selectCalls, []);
+});
+
+describe("MCP permissions", () => {
+	const toolName = "mcp__linear__get_issue";
+	const event = { toolName, input: { id: "issue-123" } };
+	const saveChoice = `Yes, and don’t ask again for: MCP(${toolName})`;
+
+	beforeEach(() => {
+		vi.stubEnv("HOME", createEmptyProject());
+	});
+	afterEach(() => {
+		vi.unstubAllEnvs();
+	});
+
+	for (const parentToolCallId of [undefined, "codemode-call"]) {
+		test(`prompts for an unmatched ${parentToolCallId ? "nested" : "direct"} MCP call`, async () => {
+			const { result, selectCalls } = await invokeTool(
+				{
+					...event,
+					toolCallId: parentToolCallId ? "codemode-call/1" : "call",
+					parentToolCallId,
+				},
+				createProject([]),
+			);
+			assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+			assert.equal(selectCalls.length, 1);
+			assert.match(selectCalls[0].message, /MCP tool/);
+			assert.match(selectCalls[0].message, /mcp__linear__get_issue/);
+			assert.match(selectCalls[0].message, /issue-123/);
+			assert.deepEqual(selectCalls[0].options, [
+				"Yes",
+				saveChoice,
+				"Allow for this session",
+				"No",
+			]);
+		});
+	}
+
+	for (const call of [
+		event,
+		{ toolName: "list_mcp_resources", input: {} },
+		{ toolName: "list_mcp_resource_templates", input: {} },
+		{
+			toolName: "read_mcp_resource",
+			input: { server: "example", uri: "file:///readme.txt" },
+		},
+	]) {
+		test(`fails closed without UI for ${call.toolName}`, async () => {
+			const result = await createHandler()(call, {
+				cwd: createProject([]),
+				hasUI: false,
+			});
+			assert.deepEqual(result, {
+				block: true,
+				reason:
+					"MCP tool is not allowed by configured permissions and no UI is available.",
+			});
+		});
+	}
+
+	for (const scope of ["project", "global"]) {
+		for (const fileName of ["permissions.json", "permissions.local.json"]) {
+			test(`reads MCP rules from ${scope} ${fileName}`, async () => {
+				const cwd = createEmptyProject();
+				const directory =
+					scope === "project"
+						? path.join(cwd, ".pi")
+						: path.join(os.homedir(), ".pi", "agent");
+				fs.mkdirSync(directory, { recursive: true });
+				fs.writeFileSync(
+					path.join(directory, fileName),
+					JSON.stringify({
+						permissions: { allow: [`MCP(${toolName})`] },
+					}),
+				);
+				const result = await createHandler()(event, { cwd, hasUI: false });
+				assert.equal(result, undefined);
+			});
+		}
+	}
+
+	for (const pattern of [toolName, "mcp__linear__*", "mcp__linear__get_*"]) {
+		test(`matches MCP pattern ${pattern} without crossing tool or server boundaries`, async () => {
+			const cwd = createEmptyProject();
+			writePiPermissions(cwd, { allow: [`MCP(${pattern})`] });
+			const allowed = await invokeTool(event, cwd);
+			assert.equal(allowed.result, undefined);
+			assert.deepEqual(allowed.selectCalls, []);
+			const denied = await invokeTool(
+				{ toolName: "mcp__other__get_issue", input: {} },
+				cwd,
+			);
+			assert.deepEqual(denied.result, {
+				block: true,
+				reason: "Blocked by user",
+			});
+		});
+	}
+
+	test("exact MCP rules do not approve a different tool on the same server", async () => {
+		const cwd = createEmptyProject();
+		writePiPermissions(cwd, { allow: [`MCP(${toolName})`] });
+		const { result } = await invokeTool(
+			{ toolName: `${toolName}_details`, input: {} },
+			cwd,
+		);
+		assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+	});
+
+	test("MCP deny rules override ask, allow, and session approvals across files", async () => {
+		const cwd = createEmptyProject();
+		const handler = createHandler();
+		await invokeTool(
+			event,
+			cwd,
+			["Allow for this session"],
+			undefined,
+			handler,
+		);
+		writePiPermissions(cwd, { allow: ["MCP(*)"], ask: [`MCP(${toolName})`] });
+		writePiPermissions(
+			cwd,
+			{ deny: ["MCP(mcp__linear__*)"] },
+			"permissions.local.json",
+		);
+		const { result, selectCalls } = await invokeTool(
+			event,
+			cwd,
+			["Yes"],
+			undefined,
+			handler,
+		);
+		assert.deepEqual(result, {
+			block: true,
+			reason: 'MCP tool matches deny rule "MCP(mcp__linear__*)"',
+		});
+		assert.deepEqual(selectCalls, []);
+	});
+
+	test("MCP ask rules override allow and session approvals", async () => {
+		const cwd = createEmptyProject();
+		const handler = createHandler();
+		await invokeTool(
+			event,
+			cwd,
+			["Allow for this session"],
+			undefined,
+			handler,
+		);
+		writePiPermissions(cwd, { allow: ["MCP(*)"], ask: [`MCP(${toolName})`] });
+		const { result, selectCalls } = await invokeTool(
+			event,
+			cwd,
+			["No"],
+			undefined,
+			handler,
+		);
+		assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+		assert.equal(selectCalls.length, 1);
+		assert.deepEqual(selectCalls[0].options, ["Yes", "No"]);
+		const headless = await handler(event, { cwd, hasUI: false });
+		assert.deepEqual(headless, {
+			block: true,
+			reason: "MCP tool requires approval and no UI is available.",
+		});
+	});
+
+	test("one-time approval does not approve later calls or save a rule", async () => {
+		const cwd = createEmptyProject();
+		const handler = createHandler();
+		const approved = await invokeTool(event, cwd, ["Yes"], undefined, handler);
+		assert.equal(approved.result, undefined);
+		const repeated = await invokeTool(event, cwd, ["No"], undefined, handler);
+		assert.deepEqual(repeated.result, {
+			block: true,
+			reason: "Blocked by user",
+		});
+		assert.equal(fs.existsSync(path.join(cwd, ".pi")), false);
+	});
+
+	test("saves exact MCP approvals locally without modifying other permission kinds", async () => {
+		const cwd = createEmptyProject();
+		const permissionsPath = writePiPermissions(
+			cwd,
+			{
+				allow: ["Bash(custom-tool *)"],
+				ask: ["MCP(mcp__linear__update_issue)"],
+				deny: ["MCP(mcp__linear__delete_issue)"],
+			},
+			"permissions.local.json",
+		);
+		const { result, editorCalls, notifications } = await invokeTool(
+			event,
+			cwd,
+			[saveChoice],
+		);
+		assert.equal(result, undefined);
+		assert.deepEqual(editorCalls, [
+			{ title: "Amend MCP permission rule", initialValue: toolName },
+		]);
+		assert.deepEqual(JSON.parse(fs.readFileSync(permissionsPath, "utf8")), {
+			permissions: {
+				allow: ["Bash(custom-tool *)", `MCP(${toolName})`],
+				ask: ["MCP(mcp__linear__update_issue)"],
+				deny: ["MCP(mcp__linear__delete_issue)"],
+			},
+		});
+		assert.deepEqual(notifications, [
+			{
+				message: `Saved MCP(${toolName}) to ${permissionsPath}`,
+				level: "info",
+			},
+		]);
+		const repeated = await invokeTool(event, cwd);
+		assert.equal(repeated.result, undefined);
+		assert.deepEqual(repeated.selectCalls, []);
+	});
+
+	for (const choice of [saveChoice, "Allow for this session"]) {
+		test(`supports edited wildcard MCP rules for ${choice}`, async () => {
+			const cwd = createEmptyProject();
+			const handler = createHandler();
+			const approved = await invokeTool(
+				event,
+				cwd,
+				[choice],
+				" MCP(mcp__linear__get_*) ",
+				handler,
+			);
+			assert.equal(approved.result, undefined);
+			const repeated = await invokeTool(
+				{ toolName: "mcp__linear__get_team", input: {} },
+				cwd,
+				[],
+				undefined,
+				handler,
+			);
+			assert.equal(repeated.result, undefined);
+			assert.deepEqual(repeated.selectCalls, []);
+			if (choice === "Allow for this session") {
+				assert.equal(fs.existsSync(path.join(cwd, ".pi")), false);
+				const otherSession = await invokeTool(event, cwd);
+				assert.deepEqual(otherSession.result, {
+					block: true,
+					reason: "Blocked by user",
+				});
+			}
+		});
+
+		for (const rule of [null, "", "   "]) {
+			test(`blocks cancelled ${choice} editing with ${JSON.stringify(rule)}`, async () => {
+				const cwd = createEmptyProject();
+				const { result } = await invokeTool(event, cwd, [choice], rule);
+				assert.deepEqual(result, {
+					block: true,
+					reason: "Permission rule save cancelled",
+				});
+				assert.equal(fs.existsSync(path.join(cwd, ".pi")), false);
+			});
+		}
+	}
+
+	for (const eventName of ["session_start", "session_shutdown"]) {
+		test(`discards MCP session approval on ${eventName}`, async () => {
+			const cwd = createEmptyProject();
+			const handlers = createHandlers();
+			const handler = handlers.get("tool_call");
+			assert.ok(handler);
+			await invokeTool(
+				event,
+				cwd,
+				["Allow for this session"],
+				undefined,
+				handler,
+			);
+			await handlers.get(eventName)?.({ reason: "new" }, { cwd });
+			const { result } = await invokeTool(
+				event,
+				cwd,
+				["No"],
+				undefined,
+				handler,
+			);
+			assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+		});
+	}
+
+	test("session changes invalidate pending and queued MCP approvals", async () => {
+		const cwd = createEmptyProject();
+		const handlers = createHandlers();
+		const handler = handlers.get("tool_call");
+		assert.ok(handler);
+		const pending = handler(event, {
+			cwd,
+			hasUI: true,
+			ui: {
+				select: async () => {
+					await handlers.get("session_shutdown")?.({ reason: "new" }, { cwd });
+					return "Yes";
+				},
+			},
+		});
+		const queued = invokeTool(event, cwd, ["Yes"], undefined, handler);
+		assert.deepEqual(await pending, {
+			block: true,
+			reason: "Session changed during permission approval",
+		});
+		assert.deepEqual((await queued).result, {
+			block: true,
+			reason: "Session changed during permission approval",
+		});
+	});
+
+	test("queued MCP calls reuse session approval without another prompt", async () => {
+		const cwd = createEmptyProject();
+		const handler = createHandler();
+		const [first, second] = await Promise.all([
+			invokeTool(event, cwd, ["Allow for this session"], undefined, handler),
+			invokeTool(event, cwd, ["No"], undefined, handler),
+		]);
+		assert.equal(first.result, undefined);
+		assert.equal(first.selectCalls.length, 1);
+		assert.equal(second.result, undefined);
+		assert.deepEqual(second.selectCalls, []);
+	});
+
+	test("MCP session approvals do not apply to another working directory", async () => {
+		const cwd = createEmptyProject();
+		const handler = createHandler();
+		const approved = await invokeTool(
+			event,
+			cwd,
+			["Allow for this session"],
+			undefined,
+			handler,
+		);
+		assert.equal(approved.result, undefined);
+		const other = await invokeTool(
+			event,
+			createEmptyProject(),
+			["No"],
+			undefined,
+			handler,
+		);
+		assert.deepEqual(other.result, { block: true, reason: "Blocked by user" });
+	});
+
+	test("a failed MCP rule save blocks the call without overwriting the target", async () => {
+		const cwd = createEmptyProject();
+		const target = path.join(cwd, ".pi");
+		fs.writeFileSync(target, "existing content");
+		const { result, notifications } = await invokeTool(event, cwd, [
+			saveChoice,
+		]);
+		assert.ok(result && typeof result === "object" && "block" in result);
+		assert.equal(result.block, true);
+		assert.equal(notifications.length, 1);
+		assert.equal(notifications[0].level, "error");
+		assert.equal(fs.readFileSync(target, "utf8"), "existing content");
+	});
+
+	test("Bash and MCP wildcard rules and session approvals remain separate", async () => {
+		const cwd = createEmptyProject();
+		writePiPermissions(cwd, { allow: ["Bash(*)"] });
+		const handler = createHandler();
+		const mcp = await invokeTool(event, cwd);
+		assert.deepEqual(mcp.result, { block: true, reason: "Blocked by user" });
+		writePiPermissions(cwd, { allow: ["MCP(*)"] });
+		const bash = await invoke("custom-tool", cwd);
+		assert.deepEqual(bash.result, { block: true, reason: "Blocked by user" });
+		writePiPermissions(cwd, { allow: [] });
+		await invoke("custom-tool", cwd, ["Allow for this session"], "*", handler);
+		assert.deepEqual(
+			(await invokeTool(event, cwd, ["No"], undefined, handler)).result,
+			{ block: true, reason: "Blocked by user" },
+		);
+		const otherHandler = createHandler();
+		await invokeTool(event, cwd, ["Allow for this session"], "*", otherHandler);
+		assert.deepEqual(
+			(await invoke("custom-tool", cwd, ["No"], undefined, otherHandler))
+				.result,
+			{ block: true, reason: "Blocked by user" },
+		);
+	});
+
+	test("malformed MCP configuration cannot fall through to a broader allow", async () => {
+		const cwd = createEmptyProject();
+		writePiPermissions(cwd, { allow: ["MCP(*)"] });
+		const localPath = path.join(cwd, ".pi", "permissions.local.json");
+		for (const content of [
+			"invalid JSON",
+			JSON.stringify({ permissions: { deny: "MCP(*)" } }),
+			JSON.stringify({ permissions: { ask: "MCP(*)" } }),
+		]) {
+			fs.writeFileSync(localPath, content);
+			await assert.rejects(
+				createHandler()(event, { cwd, hasUI: false }),
+				/Invalid JSON|Expected .* to be an array/,
+			);
+		}
+	});
+
+	test("ignores non-MCP tools and codemode wrappers", async () => {
+		const handler = createHandler();
+		for (const name of ["read", "custom_tool", "codemode", "tool_search"]) {
+			assert.equal(
+				await handler(
+					{ toolName: name, input: {} },
+					{ cwd: createEmptyProject(), hasUI: false },
+				),
+				undefined,
+			);
+		}
+	});
 });
 
 describe("ignores Claude settings", () => {
