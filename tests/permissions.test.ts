@@ -2085,6 +2085,66 @@ test("permission checks finish for long literal words ending in shell expansions
 	}
 }, 10_000);
 
+test("a stuck Bash permission check reports an error and requires one-time approval", () => {
+	const cwd = createProject([]);
+	// This nonmatching glob causes exponential backtracking in rule matching.
+	writePiPermissions(cwd, {
+		deny: [`Bash(custom ${"*a".repeat(30)}b)`],
+	});
+	const output = execFileSync(
+		process.execPath,
+		[
+			"--input-type=module",
+			"--eval",
+			`
+				import permissionsExtension from ${JSON.stringify(new URL("../extensions/permissions.ts", import.meta.url).href)};
+				let handler;
+				permissionsExtension({ on(name, callback) {
+					if (name === "tool_call") handler = callback;
+				} });
+				const results = [];
+				for (const choice of ["Yes", "No", undefined]) {
+					const notifications = [];
+					const dialogs = [];
+					const result = await handler(
+						{ toolName: "bash", input: { command: "custom " + "a".repeat(100) } },
+						{ cwd: process.argv[1], hasUI: choice !== undefined, ui: {
+							notify(message, level) { notifications.push({ message, level }); },
+							async select(message, options) { dialogs.push({ message, options }); return choice; },
+						} },
+					);
+					results.push({ result: result ?? null, notifications, dialogs });
+				}
+				const recovered = await handler(
+					{ toolName: "bash", input: { command: "pwd" } },
+					{ cwd: process.argv[1], hasUI: false },
+				);
+				console.log(JSON.stringify({ results, recovered: recovered ?? null }));
+			`,
+			cwd,
+		],
+		{ encoding: "utf8", timeout: 8_000, killSignal: "SIGKILL" },
+	);
+	const { results, recovered } = JSON.parse(output);
+	assert.equal(results[0].result, null);
+	assert.deepEqual(results[1].result, {
+		block: true,
+		reason: "Blocked by user",
+	});
+	for (const result of results.slice(0, 2)) {
+		assert.equal(result.notifications.length, 1);
+		assert.equal(result.notifications[0].level, "error");
+		assert.match(result.notifications[0].message, /timed out/i);
+		assert.equal(result.dialogs.length, 1);
+		assert.deepEqual(result.dialogs[0].options, ["Yes", "No"]);
+	}
+	assert.equal(results[2].result.block, true);
+	assert.match(results[2].result.reason, /timed out/i);
+	assert.deepEqual(results[2].dialogs, []);
+	assert.deepEqual(results[2].notifications, []);
+	assert.equal(recovered, null);
+}, 10_000);
+
 describe("actionlint default permissions", () => {
 	beforeEach(() => {
 		vi.stubEnv("HOME", createEmptyProject());
