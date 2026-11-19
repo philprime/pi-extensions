@@ -33,6 +33,9 @@ const RESEARCH_CLI_ALLOW_RULES = [
 // can mutate the working tree, delete data, or publish information.
 const DEFAULT_ALLOW_RULES: string[] = [
 	...RESEARCH_CLI_ALLOW_RULES,
+	// Read-only linting and stdout formatting, constrained by isBlockedCommand.
+	"actionlint:*",
+	"clang-format:*",
 	// File and directory inspection
 	"cat:*",
 	"head:*",
@@ -900,6 +903,104 @@ function hasOnlyInspectionOptions(
 	return true;
 }
 
+// Accept quoted option values such as --style='{...}', but no shell expansions.
+function literalLintWords(command: string): string[] | undefined {
+	if (
+		!shellWords(command).every((word) =>
+			/^(?:[A-Za-z0-9_./,:@%+=-]+|'[^'\\]*'|"[^"$`\\]*")+$/.test(word),
+		)
+	)
+		return undefined;
+	return evaluatedShellWords(command);
+}
+
+function isReadOnlyActionlintCommand(command: string): boolean {
+	const words = literalLintWords(command);
+	if (!words) return false;
+	const flags = [
+		"-h",
+		"-help",
+		"-version",
+		"-color",
+		"-no-color",
+		"-oneline",
+		"-debug",
+		"-verbose",
+	];
+	const valueOptions = [
+		"-config-file",
+		"-format",
+		"-ignore",
+		"-stdin-filename",
+	];
+	for (let index = 1; index < words.length; index++) {
+		const word = words[index];
+		if (word === "--") return true;
+		if (word === "-" || !word.startsWith("-")) continue;
+		const [option, ...parts] = word.replace(/^--/, "-").split("=");
+		if (flags.includes(option)) {
+			if (parts.length && !["true", "false"].includes(parts.join("=")))
+				return false;
+			continue;
+		}
+		if (
+			!valueOptions.includes(option) &&
+			option !== "-shellcheck" &&
+			option !== "-pyflakes"
+		)
+			return false;
+		const value = parts.length ? parts.join("=") : words[++index];
+		if (value === undefined) return false;
+		// External linters may only use their default command or be disabled.
+		if (
+			["-shellcheck", "-pyflakes"].includes(option) &&
+			value !== "" &&
+			value !== option.slice(1)
+		)
+			return false;
+	}
+	return true;
+}
+
+function isReadOnlyClangFormatCommand(command: string): boolean {
+	const words = literalLintWords(command);
+	// LLVM expands response files before parsing options, even quoted values.
+	if (!words || words.some((word) => word.startsWith("@"))) return false;
+	return hasOnlyInspectionOptions(
+		words.slice(1).map((word) => word.replace(/^--/, "-")),
+		[
+			"-",
+			"-help",
+			"-help-hidden",
+			"-help-list",
+			"-help-list-hidden",
+			"-version",
+			"-Werror",
+			"-dry-run",
+			"-n",
+			"-dump-config",
+			"-fail-on-incomplete-format",
+			"-output-replacements-xml",
+			"-sort-includes",
+			"-verbose",
+		],
+		{
+			"-Wno-error": ["unknown"],
+			"-assume-filename": null,
+			"-cursor": null,
+			"-fallback-style": null,
+			"-ferror-limit": null,
+			"-files": null,
+			"-length": null,
+			"-lines": null,
+			"-offset": null,
+			"-qualifier-alignment": null,
+			"-sort-includes": ["true", "false"],
+			"-style": null,
+		},
+	);
+}
+
 function isReadOnlyCodesignCommand(words: string[]): boolean {
 	const args = words.slice(1).flatMap((word) => {
 		if (/^-[dvh]+$/.test(word))
@@ -1156,6 +1257,8 @@ function isBlockedCommand(command: string): boolean {
 	const name = words[0];
 	if (name === undefined) return false;
 	if (BLOCKED_FIRST_WORDS.has(name)) return true;
+	if (name === "actionlint") return !isReadOnlyActionlintCommand(command);
+	if (name === "clang-format") return !isReadOnlyClangFormatCommand(command);
 	if (["codesign", "security", "openssl"].includes(name)) {
 		return !isReadOnlyDeveloperCommand(words);
 	}

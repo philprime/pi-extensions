@@ -2040,6 +2040,188 @@ test("auto-allows a built-in safe command without any project allow rule", async
 	assert.deepEqual(selectCalls, []);
 });
 
+describe("actionlint default permissions", () => {
+	beforeEach(() => {
+		vi.stubEnv("HOME", createEmptyProject());
+	});
+	afterEach(() => {
+		vi.unstubAllEnvs();
+	});
+
+	for (const command of [
+		"actionlint",
+		"actionlint -help",
+		"actionlint --help",
+		"actionlint -h",
+		"actionlint --version",
+		"actionlint -version",
+		"actionlint .github/workflows/ci.yml '.github/workflows/release job.yml'",
+		"actionlint -",
+		"actionlint -color -no-color -oneline -debug -verbose",
+		"actionlint --color=false --oneline=true",
+		"actionlint -config-file .github/actionlint.yaml -ignore SC2016 -ignore=SC2086",
+		"actionlint -format '{{json .}}' .github/workflows/ci.yml",
+		"actionlint --format='{{range .}}{{.Message}}{{end}}'",
+		"actionlint -stdin-filename .github/workflows/ci.yml -",
+		"actionlint -shellcheck= -pyflakes=",
+		"actionlint -shellcheck '' -pyflakes \"\"",
+		"actionlint --shellcheck=shellcheck --pyflakes pyflakes",
+		"actionlint -- -workflow.yml",
+		"cat .github/workflows/ci.yml | actionlint - | head -20",
+	]) {
+		test(`automatically allows read-only linting: ${command}`, async () => {
+			const { result, selectCalls } = await invoke(command, createProject([]));
+			assert.equal(result, undefined);
+			assert.deepEqual(selectCalls, []);
+		});
+	}
+
+	for (const command of [
+		"actionlint -init-config",
+		"actionlint --init-config=true",
+		"actionlint -oneline -init-config",
+		"actionlint -'init-config'",
+		"actionlint -shellcheck ./custom-tool",
+		"actionlint --shellcheck=./custom-tool",
+		"actionlint -pyflakes ./custom-tool",
+		"actionlint --pyflakes=./custom-tool",
+		"actionlint -shellcheck shellcheck -shellcheck ./custom-tool",
+		"actionlint -pyflakes=pyflakes -pyflakes=./custom-tool",
+		"actionlint -shel'lcheck'=./custom-tool",
+		"actionlint -unknown",
+		"actionlint -config-file",
+		"actionlint -format",
+		"actionlint -shellcheck",
+		"actionlint -pyflakes",
+		"actionlint $ACTIONLINT_FLAGS",
+		"actionlint *",
+		"actionlint .github/workflows/{ci,release}.yml",
+		'actionlint "$(custom-tool)"',
+		"actionlint `custom-tool`",
+		"actionlint > .github/actionlint.yaml",
+	]) {
+		for (const broadRule of [false, true]) {
+			test(`requires approval${broadRule ? " despite a broad rule" : ""}: ${command}`, async () => {
+				const cwd = createProject(broadRule ? ["actionlint:*"] : []);
+				const { result, selectCalls } = await invoke(command, cwd);
+				assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+				assert.equal(selectCalls.length, 1);
+			});
+		}
+	}
+
+	test("only skips safe actionlint stages in compound commands", async () => {
+		const { result, selectCalls } = await invoke(
+			"actionlint -oneline && actionlint -init-config",
+			createProject([]),
+		);
+		assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+		assert.equal(selectCalls.length, 1);
+		assert.match(selectCalls[0].message, /actionlint -init-config/);
+	});
+
+	test("explicit denies override read-only actionlint defaults", async () => {
+		const cwd = createProject([]);
+		writePiPermissions(cwd, { deny: ["Bash(actionlint:*)"] });
+		const { result, selectCalls } = await invoke("actionlint -oneline", cwd);
+		assert.deepEqual(result, {
+			block: true,
+			reason: 'Bash command matches deny rule "Bash(actionlint:*)"',
+		});
+		assert.deepEqual(selectCalls, []);
+	});
+});
+
+describe("clang-format default permissions", () => {
+	beforeEach(() => {
+		vi.stubEnv("HOME", createEmptyProject());
+	});
+	afterEach(() => {
+		vi.unstubAllEnvs();
+	});
+
+	for (const command of [
+		"clang-format",
+		"clang-format --help",
+		"clang-format --help-hidden",
+		"clang-format --help-list",
+		"clang-format --help-list-hidden",
+		"clang-format --version",
+		"clang-format source.cpp 'Source File.m'",
+		"clang-format --dry-run --Werror source.cpp",
+		"clang-format -n -Wno-error=unknown source.cpp",
+		"clang-format --dump-config --style=LLVM",
+		"clang-format -style=file:config/clang-format.yaml source.cpp",
+		"clang-format --style='{BasedOnStyle: LLVM, IndentWidth: 4}' source.cpp",
+		"clang-format --fallback-style=none --assume-filename=source.cpp",
+		"clang-format --output-replacements-xml --cursor=10 source.cpp",
+		"clang-format --offset 10 --length 20 --offset=40 --length=5 source.cpp",
+		"clang-format --lines=1:10 --lines 20:30 source.cpp",
+		"clang-format --files sources.txt --verbose",
+		"clang-format --fail-on-incomplete-format --ferror-limit=10 source.cpp",
+		"clang-format --qualifier-alignment=Left --sort-includes=false source.cpp",
+		"cat source.cpp | clang-format --style=Google | head -20",
+	]) {
+		test(`automatically allows stdout formatting and inspection: ${command}`, async () => {
+			const { result, selectCalls } = await invoke(command, createProject([]));
+			assert.equal(result, undefined);
+			assert.deepEqual(selectCalls, []);
+		});
+	}
+
+	for (const command of [
+		"clang-format -i source.cpp",
+		"clang-format --i source.cpp",
+		"clang-format -i=true source.cpp",
+		"clang-format --dry-run -i source.cpp",
+		"clang-format --style=LLVM -'i' source.cpp",
+		"clang-format @arguments.txt",
+		"clang-format '@arguments.txt'",
+		"clang-format --dry-run @arguments.txt",
+		"clang-format --style @arguments.txt source.cpp",
+		"clang-format --assume-filename @arguments.txt",
+		"clang-format --unknown source.cpp",
+		"clang-format --style",
+		"clang-format --files",
+		"clang-format $FORMAT_FLAGS source.cpp",
+		"clang-format *",
+		"clang-format source.{cpp,h}",
+		'clang-format "$(custom-tool)"',
+		"clang-format `custom-tool`",
+		"clang-format source.cpp > .clang-format",
+	]) {
+		for (const broadRule of [false, true]) {
+			test(`requires approval${broadRule ? " despite a broad rule" : ""}: ${command}`, async () => {
+				const cwd = createProject(broadRule ? ["clang-format:*"] : []);
+				const { result, selectCalls } = await invoke(command, cwd);
+				assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+				assert.equal(selectCalls.length, 1);
+			});
+		}
+	}
+
+	test("only skips safe formatter stages in compound commands", async () => {
+		const { result, selectCalls } = await invoke(
+			"clang-format --dry-run source.cpp && clang-format -i source.cpp",
+			createProject([]),
+		);
+		assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+		assert.equal(selectCalls.length, 1);
+		assert.match(selectCalls[0].message, /clang-format -i source.cpp/);
+	});
+
+	test("explicit denies override read-only clang-format defaults", async () => {
+		const cwd = createProject([]);
+		writePiPermissions(cwd, { deny: ["Bash(clang-format:*)"] });
+		const { result, selectCalls } = await invoke("clang-format --version", cwd);
+		assert.deepEqual(result, {
+			block: true,
+			reason: 'Bash command matches deny rule "Bash(clang-format:*)"',
+		});
+		assert.deepEqual(selectCalls, []);
+	});
+});
+
 describe("macOS default inspection permissions", () => {
 	beforeEach(() => {
 		vi.stubEnv("HOME", createEmptyProject());

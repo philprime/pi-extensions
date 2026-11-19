@@ -26,6 +26,16 @@ For focused iteration, use `npm test -- tests/<file>.test.ts`. Use `npm run lint
 - Treat unsupported shell syntax as one command requiring approval rather than broadening automatic permission rules.
 - Use `ctx.hasUI` before interactive UI calls.
 
+## Safe Default Command Permissions
+
+Treat “allow <command> in a safe way” as a request to update the default Bash permissions in `extensions/permissions.ts`:
+
+- Inspect the installed command’s help, including relevant subcommands and options. Use official documentation when side effects are unclear.
+- Automatically allow only read-only inspection, validation, or stdout-only output. Keep file mutation, publishing, arbitrary execution, secret exposure, and unknown options behind approval.
+- Reuse existing argument parsing and option-validation helpers. Account for aliases, quoted arguments, `--option=value`, repeated options, response files, and shell expansions. Do not add a broad prefix rule without guards for unsafe forms.
+- Add tests in `tests/permissions.test.ts` before implementation and confirm they fail for the intended reason. Cover safe defaults without project rules, unsafe forms even with broad allow rules, mixed compound commands, and explicit deny precedence.
+- Run `npm test -- tests/permissions.test.ts` and `npm run check`. Report which forms are allowed and which still require approval.
+
 ## Generated and Local Files
 
 - `agents.toml` is the source of truth for agent dependencies.
