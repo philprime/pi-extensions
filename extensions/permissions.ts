@@ -176,7 +176,9 @@ const DEFAULT_ALLOW_RULES: string[] = [
 	"gh auth status:*",
 	// Read-only Sentry inspection
 	"sentry --help",
+	"sentry -h",
 	"sentry --version",
+	"sentry -v",
 	"sentry * --help",
 	"sentry help:*",
 	"sentry docs:*",
@@ -196,7 +198,12 @@ const DEFAULT_ALLOW_RULES: string[] = [
 	"sentry monitor list:*",
 	"sentry platform list:*",
 	"sentry sourcemap resolve:*",
-	"sentry status show:*",
+	"sentry status:*",
+	"sentry info:*",
+	"sentry dsn list:*",
+	"sentry dsn ls:*",
+	"sentry proguard uuid:*",
+	"sentry cli completion:*",
 	"sentry cli defaults",
 	"sentry cli fix --dry-run",
 	"sentry cli import --dry-run",
@@ -1131,7 +1138,66 @@ function isBlockedGhCommand(words: string[]): boolean {
 	return BLOCKED_GH_ACTIONS.has(action);
 }
 
-function isBlockedSentryCommand(words: string[]): boolean {
+function isReadOnlySentryInspectionCommand(command: string): boolean {
+	const words = literalInspectionWords(command);
+	if (!words) return false;
+	const flags = ["--json", "--help", "-h"];
+	const valueOptions = { "--fields": null };
+	if (words[1] === "info") {
+		return hasOnlyInspectionOptions(
+			words.slice(2),
+			[
+				...flags,
+				"--config-status-json",
+				"--no-config-status-json",
+				"--no-defaults",
+				"--no-no-defaults",
+			],
+			valueOptions,
+			false,
+		);
+	}
+	if (words[1] === "status") {
+		return hasOnlyInspectionOptions(
+			words.slice(words[2] === "show" ? 3 : 2),
+			flags,
+			{ ...valueOptions, "--url": null },
+			false,
+		);
+	}
+	if (words[1] === "dsn") {
+		return hasOnlyInspectionOptions(
+			words.slice(3),
+			[...flags, "--fresh", "-f"],
+			{
+				...valueOptions,
+				"--limit": null,
+				"-n": null,
+				"--cursor": null,
+				"-c": null,
+			},
+		);
+	}
+	if (words[1] === "proguard") {
+		return hasOnlyInspectionOptions(words.slice(3), flags, valueOptions);
+	}
+	return hasOnlyInspectionOptions(
+		words.slice(3),
+		[...flags, "bash", "zsh", "fish"],
+		valueOptions,
+		false,
+	);
+}
+
+function isBlockedSentryCommand(words: string[], command: string): boolean {
+	if (
+		["info", "status"].includes(words[1]) ||
+		(words[1] === "dsn" && ["list", "ls"].includes(words[2])) ||
+		(words[1] === "proguard" && words[2] === "uuid") ||
+		(words[1] === "cli" && words[2] === "completion")
+	) {
+		return !isReadOnlySentryInspectionCommand(command);
+	}
 	if (words[1] === "api") {
 		return !(isReadOnlyApiHelpCommand(words) || isReadOnlyApiCommand(words));
 	}
@@ -1255,7 +1321,7 @@ function isBlockedCommand(command: string): boolean {
 		);
 	}
 	if (name === "gh") return isBlockedGhCommand(words);
-	if (name === "sentry") return isBlockedSentryCommand(words);
+	if (name === "sentry") return isBlockedSentryCommand(words, command);
 	return false;
 }
 

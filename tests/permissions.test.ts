@@ -3062,6 +3062,125 @@ test("auto-allows documented Sentry inspection commands", async () => {
 	}
 });
 
+describe("additional safe Sentry defaults", () => {
+	beforeEach(() => {
+		vi.stubEnv("HOME", createEmptyProject());
+	});
+	afterEach(() => {
+		vi.unstubAllEnvs();
+	});
+
+	for (const command of [
+		"sentry -h",
+		"sentry -v",
+		"sentry info",
+		"sentry info --no-defaults --json --fields url,auth",
+		"sentry info --config-status-json",
+		"sentry dsn list",
+		"sentry dsn list org/project --limit 10 --fresh --cursor next --json --fields name,dsn",
+		"sentry dsn ls org/ -n 5 -f -c next",
+		"sentry proguard uuid mapping.txt",
+		"sentry proguard uuid 'build files/mapping.txt' --json --fields uuid",
+		"sentry cli completion",
+		"sentry cli completion bash",
+		"sentry cli completion zsh --json",
+		"sentry cli completion fish --fields script",
+		"sentry status",
+		"sentry status --json --fields status",
+		"sentry status show --url https://status.sentry.io --json",
+		"sentry dsn list --help",
+		"sentry proguard uuid -h",
+		"sentry cli completion --help",
+		"sentry info --help",
+		"sentry status --help",
+		"sentry dsn list --json | jq '.[].name'",
+	]) {
+		test(`automatically allows without project rules: ${command}`, async () => {
+			const { result, selectCalls } = await invoke(command, createProject([]));
+			assert.equal(result, undefined);
+			assert.deepEqual(selectCalls, []);
+		});
+	}
+
+	for (const command of [
+		"sentry info --show-token",
+		"sentry info --unknown",
+		"sentry info --fields",
+		"sentry info arbitrary-operand",
+		"sentry dsn list --output keys.json",
+		"sentry dsn ls --unknown",
+		"sentry dsn list --cursor",
+		"sentry dsn list *",
+		"sentry dsn list $SENTRY_FLAGS",
+		"sentry proguard uuid mapping.txt --output result.txt",
+		"sentry proguard uuid mapping.txt --unknown",
+		"sentry proguard uuid --fields",
+		"sentry cli completion bash --install",
+		"sentry cli completion custom-shell",
+		"sentry cli completion bash --unknown",
+		"sentry cli completion bash > .shellrc",
+		"sentry status --unknown",
+		"sentry status show --output status.json",
+		"sentry status --url",
+		"sentry status arbitrary-subcommand",
+	]) {
+		for (const broadRule of [false, true]) {
+			test(`requires approval${broadRule ? " despite broad rules" : ""}: ${command}`, async () => {
+				const { result, selectCalls } = await invoke(
+					command,
+					createProject(broadRule ? ["sentry:*"] : []),
+				);
+				assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+				assert.equal(selectCalls.length, 1);
+			});
+		}
+	}
+
+	for (const command of [
+		"sentry proguard upload mapping.txt",
+		"sentry replay download replay-id",
+		"sentry snapshots diff baseline current",
+		"sentry issue explain PROJECT-1",
+		"sentry issue plan PROJECT-1",
+		"sentry cli setup",
+	]) {
+		test(`keeps writes and remote analysis behind approval: ${command}`, async () => {
+			const { result, selectCalls } = await invoke(command, createProject([]));
+			assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+			assert.equal(selectCalls.length, 1);
+		});
+	}
+
+	test("only skips safe Sentry stages in compound commands", async () => {
+		const { result, selectCalls } = await invoke(
+			"sentry info && sentry proguard uuid mapping.txt && sentry proguard upload mapping.txt",
+			createProject([]),
+		);
+		assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+		assert.equal(selectCalls.length, 1);
+		assert.match(selectCalls[0].message, /sentry proguard upload mapping.txt/);
+	});
+
+	test("explicit denies override additional Sentry defaults", async () => {
+		const cwd = createProject([]);
+		writePiPermissions(cwd, { deny: ["Bash(sentry:*)"] });
+		for (const command of [
+			"sentry info",
+			"sentry dsn list",
+			"sentry proguard uuid mapping.txt",
+			"sentry cli completion zsh",
+			"sentry status",
+		]) {
+			const { result, selectCalls } = await invoke(command, cwd);
+			assert.deepEqual(result, {
+				block: true,
+				reason: 'Bash command matches deny rule "Bash(sentry:*)"',
+			});
+			assert.deepEqual(selectCalls, []);
+		}
+	});
+});
+
 test("keeps sensitive and mutating Sentry commands behind approval", async () => {
 	const projectDirectory = createProject([]);
 	const commands = [
