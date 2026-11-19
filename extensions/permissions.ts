@@ -949,7 +949,7 @@ function hasOnlyInspectionOptions(
 function literalLintWords(command: string): string[] | undefined {
 	if (
 		!shellWords(command).every((word) =>
-			/^(?:[A-Za-z0-9_./,:@%+=-]+|'[^'\\]*'|"[^"$`\\]*")+$/.test(word),
+			/^(?:[A-Za-z0-9_./,:@%+=-]|'[^'\\]*'|"[^"$`\\]*")+$/.test(word),
 		)
 	)
 		return undefined;
