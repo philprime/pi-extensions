@@ -3,6 +3,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+	type BashPermissionRequest,
+	type BashPermissionResult,
+	checkBashPermissions,
+} from "./bash-permission-check.ts";
 import { backgroundJobCommand } from "./run.ts";
 
 const RESEARCH_CLI_ALLOW_RULES = [
@@ -1970,6 +1975,61 @@ function approvalMessage(
 		.join("\n");
 }
 
+// Run only in the interruptible worker. All shell parsing and rule matching
+// stays behind this boundary, including the work used to prepare approval UI.
+export function evaluateBashPermissions({
+	command,
+	cwd,
+	allowRules,
+	denyRules,
+	sessionRules,
+}: BashPermissionRequest): BashPermissionResult {
+	const commands = splitShellCommands(command);
+	const commandCandidates = commands?.length ? commands : [command];
+	const deniedRule = denyRules.find((rule) =>
+		commandCandidates.some((candidate) => {
+			const executableCommand = parseOutputRedirections(candidate)?.command;
+			return (
+				commandMatchesRule(candidate, rule) ||
+				(executableCommand !== undefined &&
+					(commandMatchesRule(executableCommand, rule) ||
+						(commands !== undefined &&
+							commandMatchesEvaluatedRule(executableCommand, rule))))
+			);
+		}),
+	);
+	if (deniedRule) return { deniedRule, commands: [] };
+	return {
+		commands: commandCandidates.map((candidate) => {
+			const allowed =
+				commands !== undefined &&
+				isAllowedSimpleCommand(
+					candidate,
+					allowRules,
+					cwd,
+					new Set(sessionRules),
+				);
+			if (allowed) {
+				return {
+					command: candidate,
+					allowed,
+					sessionApprovable: false,
+					defaultRule: "",
+				};
+			}
+			const parsed = parsedSimpleShellCommand(candidate, cwd);
+			return {
+				command: candidate,
+				allowed,
+				parsedCommand: parsed?.command,
+				sessionApprovable:
+					parsed !== undefined && !isBlockedCommand(parsed.command),
+				defaultRule: suggestedRule(parsed?.command ?? candidate),
+			};
+		}),
+	};
+}
+
 export default function permissionsExtension(pi: ExtensionAPI) {
 	let approvalQueue = Promise.resolve();
 	let sessionApprovals = new Map<string, Set<string>>();
@@ -2116,20 +2176,56 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 			approvals.set(cwd, sessionRules);
 		}
 		const command = String(input.command ?? "");
-		const commands = splitShellCommands(command);
-		const commandCandidates = commands?.length ? commands : [command];
-		const deniedRule = bashDenyRules(cwd).find((rule) =>
-			commandCandidates.some((candidate) => {
-				const executableCommand = parseOutputRedirections(candidate)?.command;
-				return (
-					commandMatchesRule(candidate, rule) ||
-					(executableCommand !== undefined &&
-						(commandMatchesRule(executableCommand, rule) ||
-							(commands !== undefined &&
-								commandMatchesEvaluatedRule(executableCommand, rule))))
-				);
-			}),
-		);
+		const rules = bashAllowRules(cwd);
+		const denyRules = bashDenyRules(cwd);
+		const check = (candidate: string) =>
+			checkBashPermissions({
+				command: candidate,
+				cwd,
+				allowRules: rules,
+				denyRules,
+				sessionRules: [...sessionRules],
+			});
+		const approveFailedCheck = async (error: unknown) => {
+			const reason =
+				error instanceof Error ? error.message : "Bash permission check failed";
+			if (approvals !== sessionApprovals)
+				return {
+					block: true,
+					reason: "Session changed during permission approval",
+				};
+			if (!ctx.hasUI)
+				return { block: true, reason: `${reason}. No UI is available.` };
+			ctx.ui.notify(reason, "error");
+			const choice = await ctx.ui.select(
+				approvalMessage(command, reason, false),
+				["Yes", "No"],
+			);
+			if (approvals !== sessionApprovals)
+				return {
+					block: true,
+					reason: "Session changed during permission approval",
+				};
+			if (choice === "Yes") return undefined;
+			return { block: true, reason: "Blocked by user" };
+		};
+		let checked: BashPermissionResult;
+		try {
+			checked = await check(command);
+		} catch (error) {
+			const approval = approvalQueue.then(() => approveFailedCheck(error));
+			approvalQueue = approval.then(
+				() => undefined,
+				() => undefined,
+			);
+			return approval;
+		}
+		if (approvals !== sessionApprovals)
+			return {
+				block: true,
+				reason: "Session changed during permission approval",
+			};
+		const { deniedRule } = checked;
 		if (deniedRule) {
 			return {
 				block: true,
@@ -2137,13 +2233,7 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 			};
 		}
 
-		const rules = bashAllowRules(cwd);
-		if (
-			commands?.length &&
-			commands.every((commandToCheck) =>
-				isAllowedSimpleCommand(commandToCheck, rules, cwd, sessionRules),
-			)
-		)
+		if (checked.commands.every((candidate) => candidate.allowed))
 			return undefined;
 
 		if (!ctx.hasUI) {
@@ -2161,24 +2251,29 @@ export default function permissionsExtension(pi: ExtensionAPI) {
 			};
 			if (approvals !== sessionApprovals) return sessionChanged;
 
-			const commandsToApprove =
-				commands && commands.length > 1 ? commands : [command];
-			for (const commandToApprove of commandsToApprove) {
-				// Check at execution time so earlier approvals also cover queued calls
-				// and repeated stages within this command.
-				if (isAllowedSimpleCommand(commandToApprove, rules, cwd, sessionRules))
-					continue;
-				// Only offer saved rules for commands whose syntax and output paths
-				// passed validation. Save the executable command, not its redirections.
-				const parsedCommand = parsedSimpleShellCommand(commandToApprove, cwd);
-				const amendable = parsedCommand !== undefined;
-				const sessionApprovable =
-					parsedCommand !== undefined &&
-					!isBlockedCommand(parsedCommand.command);
+			for (const candidate of checked.commands) {
+				const commandToApprove = candidate.command;
+				// Recheck in the worker so earlier approvals cover queued calls and
+				// repeated stages without running unbounded parsing on the UI thread.
+				let current: BashPermissionResult;
+				try {
+					current = await check(commandToApprove);
+				} catch (error) {
+					return approveFailedCheck(error);
+				}
+				if (approvals !== sessionApprovals) return sessionChanged;
+				if (current.deniedRule) {
+					return {
+						block: true,
+						reason: `Bash command matches deny rule "${normalizeRule(current.deniedRule, "Bash")}"`,
+					};
+				}
+				const stage = current.commands[0];
+				if (stage.allowed) continue;
+				// Save only executable commands whose syntax and output paths passed validation.
+				const amendable = stage.parsedCommand !== undefined;
+				const { sessionApprovable, defaultRule } = stage;
 				const sessionChoice = "Allow for this session";
-				const defaultRule = suggestedRule(
-					parsedCommand?.command ?? commandToApprove,
-				);
 				const saveChoice = `Yes, and don’t ask again for: ${defaultRule}`;
 				const choice = await ctx.ui.select(
 					approvalMessage(
