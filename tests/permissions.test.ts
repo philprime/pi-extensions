@@ -2575,6 +2575,263 @@ describe("CLI inspection permissions", () => {
 	});
 });
 
+describe("documented short and long option aliases", () => {
+	for (const command of [
+		"gh -h",
+		"gh --help",
+		...[
+			"api",
+			"auth",
+			"cache",
+			"gist",
+			"issue",
+			"label",
+			"org",
+			"pr",
+			"project",
+			"release",
+			"repo",
+			"ruleset",
+			"run",
+			"search",
+			"status",
+			"workflow",
+		].flatMap((resource) => [`gh ${resource} -h`, `gh ${resource} --help`]),
+		"gh pr create -h",
+		"gh api user -h",
+		...["", " pr", " workflows", " agent", " agent skills"].flatMap(
+			(subcommand) => [`gh kit${subcommand} -h`, `gh kit${subcommand} --help`],
+		),
+		"apple-docs -h",
+		"apple-docs --help",
+		"apple-docs types -h",
+		"apple-docs types --help",
+		"sentry issue resolve -h",
+		"sentry issue resolve --help",
+		"sentry api -h",
+		"sentry api organizations/ -h",
+		"clang-format -h",
+		"clang-format --help",
+		"sentry cli import -n",
+		"sentry cli import --dry-run",
+		"sed -E 's/a/b/' file",
+		"sed -r 's/a/b/' file",
+		"git branch -h",
+		"git remote -h",
+		"git tag -h",
+		"git config -h",
+		"git branch -l '*permission*'",
+		"git branch --list '*permission*'",
+		"git branch --all -l",
+		"git branch -v -v",
+		"git remote -vv",
+		"git tag -l 'v*'",
+		"git tag --list 'v*'",
+		"git config -l",
+		"git config --list",
+		"git config -l --show-origin",
+		"git config -l -f 'config with spaces'",
+		"git config --list --file='config with spaces'",
+		"gh api user -i",
+		"gh api user --include",
+		"gh api user --method=GET --jq='.login'",
+		"gh api user -XGET -q.login",
+		"gh api user -X=GET -q=.login -i=true",
+		"gh api user --method GET -X GET --include=true",
+		"sentry api organizations/ --method=GET --fields=id,name",
+		// Prefix-based inspection rules already accept either spelling.
+		"rg -n pattern .",
+		"rg --line-number pattern .",
+		"grep -i pattern file",
+		"grep --ignore-case pattern file",
+		"sort -r file",
+		"sort --reverse file",
+		"gh pr list -L 5",
+		"gh pr list --limit=5",
+		"xcrun simctl runtime list -j",
+		"xcrun simctl runtime list --json",
+		"actionlint -version",
+		"actionlint --version",
+		"clang-format -n file.cpp",
+		"clang-format --dry-run file.cpp",
+		"codesign -d app",
+		"codesign --display app",
+	]) {
+		test(`automatically allows ${command}`, async () => {
+			const { result, selectCalls } = await invoke(command, createProject([]));
+			assert.equal(result, undefined);
+			assert.deepEqual(selectCalls, []);
+		});
+	}
+
+	for (const command of [
+		"gh kit pr -h --unknown",
+		"gh custom-extension -h",
+		"gh api user --method=POST",
+		"gh api user -XPOST",
+		"gh api user --method=GET -X DELETE",
+		"gh api user --jq=.login --input=@payload",
+		"gh api user --include=unknown",
+		"gh api user --method=GET --unknown",
+		"sentry api organizations/ --method=GET --method=DELETE",
+		"sentry api user -X POST -h",
+		"sentry local run arbitrary-command -h",
+		"sentry local run arbitrary-command --help",
+		"sentry local run -- arbitrary-command -h",
+		"sentry monitor run arbitrary-command -h",
+		"sentry monitor run nightly -- arbitrary-command -h",
+		"sentry issue resolve -- -h",
+		"sentry cli import -n --unknown",
+		"sentry cli import -n --dry-run=false",
+		"sed -r 's/a/b/w output' file",
+		"sed -r -i.bak 's/a/b/' file",
+		"git tag -l --delete v1",
+		"git tag -l --message=message v1",
+		"git tag -l --unknown",
+		"git tag --format -l v1",
+		"git branch --help",
+		"git remote --help",
+		"git tag --help",
+		"git config --help",
+		"git branch -h --delete topic",
+		"git remote -h update",
+		"git tag -h --delete v1",
+		"git config -h --unset user.name",
+		"git config -l --unset user.name",
+		"git config -l --edit",
+		"git config -l --unknown",
+		"git config -l --file",
+		"git config -l @options",
+		"clang-format -h @options",
+	]) {
+		for (const broadRule of [false, true]) {
+			test(`requires approval${broadRule ? " despite a broad rule" : ""}: ${command}`, async () => {
+				const { result, selectCalls } = await invoke(
+					command,
+					createProject(
+						broadRule
+							? ["gh *", "sentry *", "git *", "clang-format *", "sed *"]
+							: [],
+					),
+				);
+				assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+				assert.equal(selectCalls.length, 1);
+			});
+		}
+	}
+
+	test("only prompts for a non-inspection stage after short help", async () => {
+		const { result, selectCalls } = await invoke(
+			"gh kit agent skills -h && clang-format -h && custom-tool run",
+			createProject([]),
+		);
+		assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+		assert.equal(selectCalls.length, 1);
+		assert.ok(selectCalls[0].message.includes("custom-tool run"));
+	});
+
+	test("explicit denies override newly supported aliases", async () => {
+		for (const command of [
+			"gh kit pr -h",
+			"sentry issue resolve -h",
+			"clang-format -h",
+			"git tag -l",
+			"git config -l",
+			"gh api user -i",
+		]) {
+			const cwd = createProject([]);
+			writePiPermissions(cwd, { deny: [`Bash(${command})`] });
+			const { result, selectCalls } = await invoke(command, cwd);
+			assert.equal((result as { block: boolean }).block, true);
+			assert.match((result as { reason: string }).reason, /matches deny rule/);
+			assert.deepEqual(selectCalls, []);
+		}
+	});
+});
+
+describe("long-option Git inspection permissions", () => {
+	for (const command of [
+		"git branch --all --list",
+		"git branch --all --list '*permission*'",
+		"git branch --all --list --all --sort=-committerdate",
+		'git branch "--all" "--list" "*permission*"',
+		"git branch --list --all",
+		"git branch -a --list",
+		"git branch -vv",
+		"git branch --verbose --verbose",
+		"git branch --verbose --verbose --all",
+		"git remote -v",
+		"git remote --verbose",
+		"git remote --verbose --verbose",
+		"git remote --verbose show -n origin",
+	]) {
+		test(`automatically allows ${command} without project rules`, async () => {
+			const { result, selectCalls } = await invoke(command, createProject([]));
+			assert.equal(result, undefined);
+			assert.deepEqual(selectCalls, []);
+		});
+	}
+
+	for (const command of [
+		"git branch --all --list --delete topic",
+		"git branch --all --list --force",
+		"git branch --all --list --track=direct topic",
+		"git branch --all --list --set-upstream-to=origin/main topic",
+		"git branch --all --list --unknown",
+		"git branch --all --list --all=true",
+		"git branch --all --list --sort",
+		"git branch --format -l topic",
+		"git branch --contains -l topic",
+		"git branch --all --list --abbrev=invalid",
+		"git branch --all --list --sort=-committerdate --edit-description",
+		"git branch --all --list @options",
+		"git branch --verbose --verbose topic",
+		"git remote --verbose add upstream https://example.com/repo.git",
+		"git remote -v remove origin",
+		"git remote --verbose update",
+		"git remote --verbose --unknown",
+		"git remote --verbose=true",
+		"git remote --verbose @options",
+		"git remote --verbose show --unknown origin",
+		"git branch --all --list $FLAGS",
+		'git branch --all --list "$FLAGS"',
+	]) {
+		for (const broadRule of [false, true]) {
+			test(`requires approval${broadRule ? " despite a broad rule" : ""}: ${command}`, async () => {
+				const { result, selectCalls } = await invoke(
+					command,
+					createProject(broadRule ? ["git *"] : []),
+				);
+				assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+				assert.equal(selectCalls.length, 1);
+			});
+		}
+	}
+
+	test("only prompts for the unsafe stage of a compound command", async () => {
+		const { result, selectCalls } = await invoke(
+			"git branch --all --list && git remote --verbose && git remote --verbose update",
+			createProject([]),
+		);
+		assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+		assert.equal(selectCalls.length, 1);
+		assert.ok(selectCalls[0].message.includes("git remote --verbose update"));
+	});
+
+	test("explicit deny rules override long-option defaults", async () => {
+		const cwd = createProject([]);
+		writePiPermissions(cwd, {
+			deny: ["Bash(git branch:*)", "Bash(git remote:*)"],
+		});
+		for (const command of ["git branch --all --list", "git remote --verbose"]) {
+			const { result, selectCalls } = await invoke(command, cwd);
+			assert.equal((result as { block: boolean }).block, true);
+			assert.match((result as { reason: string }).reason, /matches deny rule/);
+			assert.deepEqual(selectCalls, []);
+		}
+	});
+});
+
 test("auto-allows built-in read-only git without any project allow rule", async () => {
 	const projectDirectory = createProject([]);
 	const { result, selectCalls } = await invoke(

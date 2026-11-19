@@ -131,20 +131,12 @@ const DEFAULT_ALLOW_RULES: string[] = [
 	"git reflog",
 	"git reflog show:*",
 	"git reflog list:*",
-	"git branch --list:*",
-	"git branch -a --list:*",
-	"git branch --show-current:*",
-	"git branch -vv:*",
-	"git tag --list:*",
-	"git remote -v:*",
-	"git remote show:*",
 	"git stash list:*",
 	"git stash show:*",
 	"git worktree list:*",
-	"git config --get:*",
-	"git config --list:*",
 	// Read-only GitHub CLI inspection
 	"gh --help",
+	"gh -h",
 	"gh help:*",
 	"gh api user --jq '.login'",
 	"gh gist list:*",
@@ -182,7 +174,6 @@ const DEFAULT_ALLOW_RULES: string[] = [
 	"sentry -h",
 	"sentry --version",
 	"sentry -v",
-	"sentry * --help",
 	"sentry help:*",
 	"sentry docs:*",
 	"sentry auth status:*",
@@ -210,6 +201,7 @@ const DEFAULT_ALLOW_RULES: string[] = [
 	"sentry cli defaults",
 	"sentry cli fix --dry-run",
 	"sentry cli import --dry-run",
+	"sentry cli import -n",
 	"sentry cli upgrade --check",
 	"sentry dashboard list:*",
 	"sentry dashboard view:*",
@@ -807,12 +799,29 @@ function isReadOnlyGhStackCommand(words: string[]): boolean {
 	);
 }
 
+function isReadOnlyResearchCliHelpCommand(words: string[]): boolean {
+	if (!["-h", "--help"].includes(words.at(-1) ?? "")) return false;
+	const commandWords = words.slice(0, -1);
+	if (!commandWords.every((word) => /^[a-z][a-z-]*$/.test(word))) return false;
+	const command = commandWords.join(" ");
+	return RESEARCH_CLI_ALLOW_RULES.some((rule) => {
+		const prefix = rule.replace(/(?::\*| --help| -h)$/, "");
+		return prefix === command || prefix.startsWith(`${command} `);
+	});
+}
+
 function isReadOnlyGhHelpCommand(words: string[]): boolean {
+	if (
+		words[0] === "gh" &&
+		words.length === 2 &&
+		["-h", "--help"].includes(words[1])
+	)
+		return true;
 	return (
 		words[0] === "gh" &&
 		words.length >= 3 &&
 		words.length <= 4 &&
-		words[words.length - 1] === "--help" &&
+		["--help", "-h"].includes(words[words.length - 1]) &&
 		[
 			"api",
 			"auth",
@@ -840,7 +849,7 @@ function isReadOnlyApiHelpCommand(words: string[]): boolean {
 		(words[0] === "gh" || words[0] === "sentry") &&
 		words[1] === "api" &&
 		(words.length === 3 || (words.length === 4 && !words[2].startsWith("-"))) &&
-		words[words.length - 1] === "--help"
+		["--help", "-h"].includes(words[words.length - 1])
 	);
 }
 
@@ -851,25 +860,47 @@ function isReadOnlyApiCommand(words: string[]): boolean {
 	let endpoint: string | undefined;
 	for (let index = 2; index < words.length; index++) {
 		const word = words[index];
-		if (word === "--method" || word === "-X") {
-			if (words[++index]?.toUpperCase() !== "GET") return false;
+		const equalsIndex = word.startsWith("-") ? word.indexOf("=") : -1;
+		const attachedShortValue = cli === "gh" && /^-[Xq].+/.test(word);
+		const option = attachedShortValue
+			? word.slice(0, 2)
+			: equalsIndex < 0
+				? word
+				: word.slice(0, equalsIndex);
+		const inlineValue = attachedShortValue
+			? word.slice(2).replace(/^=/, "")
+			: equalsIndex < 0
+				? undefined
+				: word.slice(equalsIndex + 1);
+		if (option === "--method" || option === "-X") {
+			if ((inlineValue ?? words[++index])?.toUpperCase() !== "GET")
+				return false;
 			continue;
 		}
 		if (
-			(cli === "gh" && (word === "--jq" || word === "-q")) ||
-			(cli === "sentry" && word === "--fields")
+			(cli === "gh" && (option === "--jq" || option === "-q")) ||
+			(cli === "sentry" && option === "--fields")
 		) {
-			const value = words[++index];
+			const value = inlineValue ?? words[++index];
 			if (!value || value.startsWith("-")) return false;
 			continue;
 		}
 		if (
 			(cli === "gh" &&
-				["--paginate", "--slurp", "--silent", "--include"].includes(word)) ||
-			(cli === "sentry" && ["--json", "--silent"].includes(word))
-		)
+				["--paginate", "--slurp", "--silent", "--include", "-i"].includes(
+					option,
+				)) ||
+			(cli === "sentry" && ["--json", "--silent"].includes(option))
+		) {
+			if (
+				inlineValue !== undefined &&
+				(cli !== "gh" || !["true", "false"].includes(inlineValue))
+			)
+				return false;
 			continue;
-		if (word.startsWith("-") || endpoint !== undefined) return false;
+		}
+		if (word.startsWith("-") || word.startsWith("@") || endpoint !== undefined)
+			return false;
 		endpoint = word;
 	}
 
@@ -885,7 +916,7 @@ function isReadOnlyApiCommand(words: string[]): boolean {
 function hasOnlyInspectionOptions(
 	words: string[],
 	flags: string[],
-	valueOptions: Record<string, readonly string[] | null>,
+	valueOptions: Record<string, readonly string[] | RegExp | null>,
 	allowOperands = true,
 ): boolean {
 	for (let index = 0; index < words.length; index++) {
@@ -903,7 +934,11 @@ function hasOnlyInspectionOptions(
 		const allowedValues = valueOptions[option];
 		if (
 			!value ||
-			(allowedValues ? !allowedValues.includes(value) : value.startsWith("-"))
+			(allowedValues instanceof RegExp
+				? !allowedValues.test(value)
+				: allowedValues
+					? !allowedValues.includes(value)
+					: value.startsWith("-"))
 		)
 			return false;
 	}
@@ -977,6 +1012,7 @@ function isReadOnlyClangFormatCommand(command: string): boolean {
 		words.slice(1).map((word) => word.replace(/^--/, "-")),
 		[
 			"-",
+			"-h",
 			"-help",
 			"-help-hidden",
 			"-help-list",
@@ -1217,17 +1253,24 @@ function isReadOnlyCliCommand(command: string): boolean {
 	const words = evaluatedShellWords(command);
 	return (
 		isReadOnlyManCommand(words) ||
+		isReadOnlyResearchCliHelpCommand(words) ||
 		isReadOnlyGhStackCommand(words) ||
 		isReadOnlyGhHelpCommand(words) ||
 		isReadOnlyApiHelpCommand(words) ||
+		isReadOnlySentryHelpCommand(words) ||
 		isReadOnlyApiCommand(words) ||
 		isReadOnlyDeveloperCommand(words)
 	);
 }
 
 function isBlockedGhCommand(words: string[]): boolean {
-	if (isReadOnlyGhHelpCommand(words) || isReadOnlyApiHelpCommand(words))
+	if (
+		isReadOnlyGhHelpCommand(words) ||
+		isReadOnlyApiHelpCommand(words) ||
+		isReadOnlyGhStackCommand(words)
+	)
 		return false;
+	if (["-h", "--help"].includes(words.at(-1) ?? "")) return true;
 	const resource = words[1];
 	if (resource === undefined || resource.startsWith("-")) return false;
 
@@ -1290,7 +1333,30 @@ function isReadOnlySentryInspectionCommand(command: string): boolean {
 	);
 }
 
+function isReadOnlySentryHelpCommand(words: string[]): boolean {
+	if (words[0] !== "sentry" || !["-h", "--help"].includes(words.at(-1) ?? ""))
+		return false;
+	if (isReadOnlyApiHelpCommand(words)) return true;
+	const commandWords = words.slice(1, -1);
+	if (!commandWords.every((word) => /^[a-z][a-z-]*$/.test(word))) return false;
+	// Limit help to command paths, never operands or commands passed to local/monitor run.
+	return (
+		commandWords.length <= 2 ||
+		(commandWords.length === 3 &&
+			commandWords[0] === "alert" &&
+			["issues", "metrics"].includes(commandWords[1]))
+	);
+}
+
 function isBlockedSentryCommand(words: string[], command: string): boolean {
+	if (["-h", "--help"].includes(words.at(-1) ?? ""))
+		return !isReadOnlySentryHelpCommand(words);
+	if (words[1] === "cli" && words[2] === "import") {
+		return !(
+			words.length === 4 &&
+			["-h", "--help", "-n", "--dry-run"].includes(words[3])
+		);
+	}
 	if (
 		["info", "status"].includes(words[1]) ||
 		(words[1] === "dsn" && ["list", "ls"].includes(words[2])) ||
@@ -1307,6 +1373,185 @@ function isBlockedSentryCommand(words: string[], command: string): boolean {
 	return (
 		words[2] === "status" &&
 		words.slice(3).some((word) => word.startsWith("--show-token"))
+	);
+}
+
+function isReadOnlyGitBranchCommand(args: string[]): boolean {
+	if (args.some((word) => word.startsWith("@"))) return false;
+	return hasOnlyInspectionOptions(
+		args,
+		[
+			...args.filter((word) => /^-[arlvqi]+$/.test(word)),
+			"--all",
+			"--remotes",
+			"--list",
+			"--show-current",
+			"--verbose",
+			"--quiet",
+			"--ignore-case",
+			"--omit-empty",
+			"--no-omit-empty",
+			"--color",
+			"--no-color",
+			"--column",
+			"--no-column",
+			"--abbrev",
+			"--no-abbrev",
+		],
+		{
+			"--color": ["always", "auto", "never"],
+			"--column": null,
+			"--abbrev": /^\d+$/,
+			"--contains": null,
+			"--no-contains": null,
+			"--merged": null,
+			"--no-merged": null,
+			"--points-at": null,
+			"--sort": /^-?[^-].*$/,
+			"--format": null,
+		},
+		args.some(
+			(word) => word === "--list" || /^-[arlvqi]*l[arlvqi]*$/.test(word),
+		),
+	);
+}
+
+function isReadOnlyGitRemoteCommand(args: string[]): boolean {
+	let index = 0;
+	while (/^-v+$/.test(args[index] ?? "") || args[index] === "--verbose")
+		index++;
+	if (index === args.length) return true;
+	return (
+		args[index] === "show" &&
+		!args.slice(index + 1).some((word) => word.startsWith("@")) &&
+		hasOnlyInspectionOptions(args.slice(index + 1), ["-n"], {})
+	);
+}
+
+function isReadOnlyGitTagCommand(args: string[]): boolean {
+	if (args.some((word) => word.startsWith("@"))) return false;
+	return hasOnlyInspectionOptions(
+		args,
+		[
+			...args.filter((word) => /^-[li]+$/.test(word) || /^-n\d*$/.test(word)),
+			"--list",
+			"--ignore-case",
+			"--omit-empty",
+			"--no-omit-empty",
+			"--column",
+			"--no-column",
+			"--color",
+		],
+		{
+			"--color": ["always", "auto", "never"],
+			"--column": null,
+			"--contains": null,
+			"--no-contains": null,
+			"--merged": null,
+			"--no-merged": null,
+			"--points-at": null,
+			"--sort": /^-?[^-].*$/,
+			"--format": null,
+		},
+		args.some((word) => word === "--list" || /^-[li]*l[li]*$/.test(word)),
+	);
+}
+
+function isReadOnlyGitConfigCommand(args: string[]): boolean {
+	if (args.some((word) => word.startsWith("@"))) return false;
+	return (
+		args.some((word) => ["-l", "--list", "--get"].includes(word)) &&
+		hasOnlyInspectionOptions(
+			args,
+			[
+				"-l",
+				"--list",
+				"--get",
+				"--global",
+				"--system",
+				"--local",
+				"--worktree",
+				"-z",
+				"--null",
+				"--name-only",
+				"--show-origin",
+				"--show-scope",
+				"--includes",
+				"--no-includes",
+				"--fixed-value",
+				"--bool",
+				"--int",
+				"--bool-or-int",
+				"--bool-or-str",
+				"--path",
+				"--expiry-date",
+			],
+			{
+				"-f": null,
+				"--file": null,
+				"--blob": null,
+				"-t": [
+					"bool",
+					"int",
+					"bool-or-int",
+					"bool-or-str",
+					"path",
+					"expiry-date",
+				],
+				"--type": [
+					"bool",
+					"int",
+					"bool-or-int",
+					"bool-or-str",
+					"path",
+					"expiry-date",
+				],
+				"--default": null,
+			},
+			args.includes("--get"),
+		)
+	);
+}
+
+function isReadOnlyGitShortHelpCommand(words: string[]): boolean {
+	// Unlike --help, -h prints usage without launching a configurable man viewer.
+	return (
+		words.length === 3 &&
+		words[0] === "git" &&
+		["branch", "remote", "tag", "config"].includes(words[1]) &&
+		words[2] === "-h"
+	);
+}
+
+function isReadOnlyGitInspectionCommand(command: string): boolean {
+	const words = literalLintWords(command);
+	if (words?.[0] !== "git") return false;
+	if (isReadOnlyGitShortHelpCommand(words)) return true;
+	const args = words.slice(2);
+	if (words[1] === "remote") return isReadOnlyGitRemoteCommand(args);
+	if (words[1] === "tag")
+		return (
+			isReadOnlyGitTagCommand(args) &&
+			args.some((word) => word === "--list" || /^-[li]*l[li]*$/.test(word))
+		);
+	if (words[1] === "config") return isReadOnlyGitConfigCommand(args);
+	if (words[1] !== "branch" || !isReadOnlyGitBranchCommand(args)) return false;
+	return (
+		args.some(
+			(word) =>
+				["--list", "--show-current"].includes(word) ||
+				/^-[arlvqi]*l[arlvqi]*$/.test(word),
+		) ||
+		args.reduce(
+			(count, word) =>
+				count +
+				(word === "--verbose"
+					? 1
+					: /^-[arlvqi]+$/.test(word)
+						? [...word].filter((character) => character === "v").length
+						: 0),
+			0,
+		) >= 2
 	);
 }
 
@@ -1329,8 +1574,9 @@ function isBlockedCommand(command: string): boolean {
 		return !isReadOnlyDeveloperCommand(words);
 	}
 	if (name === "apple-docs" || (name === "gh" && words[1] === "kit")) {
-		return !RESEARCH_CLI_ALLOW_RULES.some((rule) =>
-			commandMatchesRule(command, rule),
+		return !(
+			isReadOnlyResearchCliHelpCommand(words) ||
+			RESEARCH_CLI_ALLOW_RULES.some((rule) => commandMatchesRule(command, rule))
 		);
 	}
 	if (name === "man") return !isReadOnlyManCommand(words);
@@ -1345,7 +1591,7 @@ function isBlockedCommand(command: string): boolean {
 	}
 	if (name === "sed") {
 		const args = words.slice(1).filter((word) => word !== "-n");
-		if (args[0] === "-E") args.shift();
+		if (args[0] === "-E" || args[0] === "-r") args.shift();
 		const script = args[0] ?? "";
 		// Limit scripts to numeric prints or one slash-delimited substitution.
 		// Only the optional global flag is allowed, never execution or writes.
@@ -1393,6 +1639,7 @@ function isBlockedCommand(command: string): boolean {
 		);
 	}
 	if (name === "git") {
+		if (isReadOnlyGitShortHelpCommand(words)) return false;
 		const subcommand = gitSubcommand(words);
 		return (
 			(subcommand !== undefined && BLOCKED_GIT_SUBCOMMANDS.has(subcommand)) ||
@@ -1402,19 +1649,19 @@ function isBlockedCommand(command: string): boolean {
 					["expire", "delete", "drop", "write"].includes(word),
 				)) ||
 			(subcommand === "branch" &&
-				args.some((word) =>
-					/^-[^-]*[dDmMcCfu]|^--(?:delete|move|copy|force|edit-description|set-upstream-to|unset-upstream|create-reflog)(?:=|$)/.test(
-						word,
-					),
+				!isReadOnlyGitBranchCommand(
+					words.slice(words.indexOf(subcommand) + 1),
+				)) ||
+			(subcommand === "remote" &&
+				!isReadOnlyGitRemoteCommand(
+					words.slice(words.indexOf(subcommand) + 1),
 				)) ||
 			(subcommand === "config" &&
-				args.some((word) => word === "-e" || word === "--edit")) ||
-			(subcommand === "tag" &&
-				args.some((word) =>
-					/^-[^-]*[dfasumFe]|^--(?:delete|force|annotate|sign|create-reflog)$/.test(
-						word,
-					),
+				!isReadOnlyGitConfigCommand(
+					words.slice(words.indexOf(subcommand) + 1),
 				)) ||
+			(subcommand === "tag" &&
+				!isReadOnlyGitTagCommand(words.slice(words.indexOf(subcommand) + 1))) ||
 			args.some((word) =>
 				/^(--output|--ext-diff|--textconv|--open-files-in-pager)(=|$)/.test(
 					word,
@@ -1606,6 +1853,7 @@ function isAllowedSimpleCommand(
 			isReadOnlyCliCommand(parsed.command) ||
 			isReadOnlySimctlCommand(parsed.command) ||
 			isReadOnlyGitDirectoryCommand(parsed.command) ||
+			isReadOnlyGitInspectionCommand(parsed.command) ||
 			[...rules, ...sessionRules].some((rule) =>
 				commandMatchesRule(parsed.command, rule),
 			))
