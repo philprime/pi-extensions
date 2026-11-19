@@ -2040,6 +2040,51 @@ test("auto-allows a built-in safe command without any project allow rule", async
 	assert.deepEqual(selectCalls, []);
 });
 
+test("permission checks finish for long literal words ending in shell expansions", () => {
+	const cwd = createProject(["actionlint:*", "clang-format:*"]);
+	const output = execFileSync(
+		process.execPath,
+		[
+			"--input-type=module",
+			"--eval",
+			`
+				import permissionsExtension from ${JSON.stringify(new URL("../extensions/permissions.ts", import.meta.url).href)};
+				let handler;
+				permissionsExtension({ on(name, callback) {
+					if (name === "tool_call") handler = callback;
+				} });
+				const results = [];
+				for (const command of JSON.parse(process.argv[2])) {
+					const result = await handler(
+						{ toolName: "bash", input: { command } },
+						{ cwd: process.argv[1], hasUI: false },
+					);
+					results.push(result ?? null);
+				}
+				console.log(JSON.stringify(results));
+			`,
+			cwd,
+			JSON.stringify([
+				"rg -n -i 'helper|subprocess' Targets/AppTests/Sources/AudioEngine/AppCapture*",
+				"actionlint Targets/AppTests/Sources/AudioEngine/AppCapture*",
+				"clang-format Targets/AppTests/Sources/AudioEngine/AppCapture*",
+				"git branch --list Targets/AppTests/Sources/AudioEngine/AppCapture*",
+			]),
+		],
+		{
+			encoding: "utf8",
+			// A blocked event loop cannot honor a test or Promise timeout.
+			timeout: 5_000,
+			killSignal: "SIGKILL",
+		},
+	);
+	const [search, ...expansions] = JSON.parse(output);
+	assert.equal(search, null);
+	for (const result of expansions) {
+		assert.equal(result.block, true);
+	}
+}, 10_000);
+
 describe("actionlint default permissions", () => {
 	beforeEach(() => {
 		vi.stubEnv("HOME", createEmptyProject());
