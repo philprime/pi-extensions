@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, test, vi } from "vitest";
 import permissionsExtension from "../extensions/permissions.ts";
 
@@ -2084,6 +2085,42 @@ test("permission checks finish for long literal words ending in shell expansions
 		assert.equal(result.block, true);
 	}
 }, 10_000);
+
+test("Bash permission workers run without locally installed Pi dependencies", () => {
+	const cwd = createEmptyProject();
+	const extensionDirectory = path.join(cwd, "extensions");
+	fs.cpSync(path.resolve("extensions"), extensionDirectory, {
+		recursive: true,
+	});
+	const output = execFileSync(
+		process.execPath,
+		[
+			"--input-type=module",
+			"--eval",
+			`
+				import { checkBashPermissions } from ${JSON.stringify(pathToFileURL(path.join(extensionDirectory, "bash-permission-check.ts")).href)};
+				const results = [];
+				for (const command of ["pwd", "clang-format -i source.cpp"]) {
+					results.push(await checkBashPermissions({
+						command, cwd: process.argv[1], allowRules: ["pwd", "clang-format:*"],
+						denyRules: [], sessionRules: [],
+					}));
+				}
+				results.push(await checkBashPermissions({
+					command: "pwd", cwd: process.argv[1], allowRules: ["pwd"],
+					denyRules: ["pwd"], sessionRules: [],
+				}));
+				console.log(JSON.stringify(results));
+			`,
+			cwd,
+		],
+		{ encoding: "utf8", timeout: 5_000, killSignal: "SIGKILL" },
+	);
+	const [safe, unsafe, denied] = JSON.parse(output);
+	assert.equal(safe.commands[0].allowed, true);
+	assert.equal(unsafe.commands[0].allowed, false);
+	assert.equal(denied.deniedRule, "pwd");
+});
 
 test("a stuck Bash permission check reports an error and requires one-time approval", () => {
 	const cwd = createProject([]);

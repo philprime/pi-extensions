@@ -48,7 +48,7 @@ function getWorker(): Worker {
 	const activeWorker = new Worker(
 		`
 			const { parentPort } = require("node:worker_threads");
-			import(${JSON.stringify(new URL("./permissions.ts", import.meta.url).href)}).then(({ evaluateBashPermissions }) => {
+			import(${JSON.stringify(new URL("./bash-permission-parser.ts", import.meta.url).href)}).then(({ evaluateBashPermissions }) => {
 				parentPort.on("message", ({ id, request }) => {
 					try {
 						parentPort.postMessage({ id, result: evaluateBashPermissions(request) });
