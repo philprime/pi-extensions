@@ -1604,6 +1604,133 @@ test("prompts for commands on both sides of a pipeline containing a redirection"
 	assert.match(selectCalls[1].message, /unapproved-head -100/);
 });
 
+test("allows mkdir and mv with literal paths inside the working directory", async () => {
+	const cwd = createEmptyProject();
+	fs.writeFileSync(path.join(cwd, "source.txt"), "source");
+	fs.mkdirSync(path.join(cwd, "destination"));
+	for (const command of [
+		"mkdir output",
+		"mkdir -pv nested/output other",
+		'mkdir -- "directory with spaces"',
+		`mkdir ${cwd}/absolute`,
+		"mkdir .",
+		"mv source.txt renamed.txt",
+		"mv -nv source.txt destination",
+		"mv -f -i -n source.txt destination",
+		"mv source.txt other.txt destination",
+		'mv -- "source.txt" "renamed file.txt"',
+		"mv destination/source.txt .",
+		`mv ${cwd}/source.txt ${cwd}/renamed.txt`,
+		"mkdir output && mv source.txt output",
+	]) {
+		const { result, selectCalls } = await invoke(command, cwd);
+		assert.equal(result, undefined, command);
+		assert.deepEqual(selectCalls, [], command);
+	}
+});
+
+test("requires approval for unsafe mkdir and mv even with broad allow rules", async () => {
+	const cwd = createProject(["mkdir *", "mv *", "cd *"]);
+	const outside = createEmptyProject();
+	fs.symlinkSync(outside, path.join(cwd, "linked"));
+	fs.mkdirSync(path.join(cwd, "destination"));
+	fs.symlinkSync(outside, path.join(cwd, "destination", "source"));
+	for (const command of [
+		"mkdir ../outside",
+		`mkdir ${outside}/output`,
+		"mkdir local ../outside",
+		"mkdir linked/output",
+		"mkdir linked/../output",
+		"mkdir .pi/hooks",
+		"mkdir -m 777 output",
+		"mkdir --mode=777 output",
+		"mkdir --unknown output",
+		"mkdir $OUTPUT",
+		"mkdir ~/output",
+		"mkdir output*",
+		"mkdir ''",
+		"mkdir -p",
+		"mv source ../outside",
+		"mv ../source destination",
+		"mv source linked",
+		"mv linked/source destination",
+		"mv source destination",
+		"mv . destination",
+		"mv .pi destination",
+		"mv source --target-directory=../outside",
+		"mv -t ../outside source",
+		"mv --backup source destination",
+		"mv source destination*",
+		"mv source",
+		"mv source ''",
+		"cd .. && mkdir output",
+	]) {
+		const { result, selectCalls } = await invoke(command, cwd);
+		assert.deepEqual(
+			result,
+			{ block: true, reason: "Blocked by user" },
+			command,
+		);
+		assert.equal(selectCalls.length, 1, command);
+	}
+});
+
+test("allows local mkdir and mv without a UI", async () => {
+	const cwd = createEmptyProject();
+	for (const command of ["mkdir -p output", "mv source destination"]) {
+		const result = await createHandler()(
+			{ toolName: "bash", input: { command } },
+			{ cwd, hasUI: false },
+		);
+		assert.equal(result, undefined, command);
+	}
+});
+
+test("prompts only for the unsafe stage after a local mkdir", async () => {
+	const cwd = createEmptyProject();
+	const { result, selectCalls } = await invoke(
+		"mkdir output && mv source ../outside",
+		cwd,
+	);
+	assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+	assert.equal(selectCalls.length, 1);
+	assert.match(selectCalls[0].message, /mv source/);
+});
+
+test("directory-changing compounds preserve explicit deny precedence", async () => {
+	const cwd = createEmptyProject();
+	writePiPermissions(cwd, { deny: ["Bash(mkdir *)"] });
+	const { result, selectCalls } = await invoke("cd .. && mkdir output", cwd);
+	assert.deepEqual(result, {
+		block: true,
+		reason: 'Bash command matches deny rule "Bash(mkdir *)"',
+	});
+	assert.deepEqual(selectCalls, []);
+});
+
+test("requires approval when a prior move can change later path resolution", async () => {
+	const cwd = createEmptyProject();
+	const outside = createEmptyProject();
+	fs.mkdirSync(path.join(cwd, "source"));
+	fs.symlinkSync(outside, path.join(cwd, "source", "linked"));
+	const { result, selectCalls } = await invoke(
+		"mv source destination && mkdir destination/linked/output",
+		cwd,
+	);
+	assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+	assert.equal(selectCalls.length, 1);
+});
+
+test("explicit deny rules override local mkdir and mv defaults", async () => {
+	const cwd = createEmptyProject();
+	writePiPermissions(cwd, { deny: ["Bash(mkdir *)", "Bash(mv *)"] });
+	for (const command of ["mkdir output", "mv source destination"]) {
+		const { result, selectCalls } = await invoke(command, cwd);
+		assert.ok((result as { block: boolean }).block, command);
+		assert.deepEqual(selectCalls, [], command);
+	}
+});
+
 test("allows an allowlisted command to redirect output to a new project file", async () => {
 	const projectDirectory = createProject([
 		"/Applications/Blender.app/Contents/MacOS/Blender *",
