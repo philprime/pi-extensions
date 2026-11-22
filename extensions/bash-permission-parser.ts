@@ -1431,9 +1431,11 @@ function hasShortOption(words: string[], options: string): boolean {
 	);
 }
 
-function isBlockedCommand(command: string): boolean {
+function isBlockedCommand(command: string, cwd: string): boolean {
 	const words = evaluatedShellWords(command);
 	const name = words[0];
+	if (name === "mkdir" || name === "mv")
+		return !isWorkingDirectoryCommand(command, cwd);
 	if (name === undefined) return false;
 	if (BLOCKED_FIRST_WORDS.has(name)) return true;
 	if (name === "actionlint") return !isReadOnlyActionlintCommand(command);
@@ -1706,6 +1708,51 @@ function isReadOnlyMacOSCommand(command: string): boolean {
 	return true;
 }
 
+function isWorkingDirectoryCommand(command: string, cwd: string): boolean {
+	const words = literalInspectionWords(command);
+	if (!words || !["mkdir", "mv"].includes(words[0])) return false;
+	const moving = words[0] === "mv";
+	const operands: string[] = [];
+	let endOfOptions = false;
+	for (const word of words.slice(1)) {
+		if (!endOfOptions && word === "--") {
+			endOfOptions = true;
+		} else if (!endOfOptions && word.startsWith("-")) {
+			if (!(moving ? /^-[finhv]+$/ : /^-[pv]+$/).test(word)) return false;
+		} else {
+			operands.push(word);
+		}
+	}
+	if (operands.length < (moving ? 2 : 1)) return false;
+	const safePath = (filePath: string, allowRoot: boolean) =>
+		filePath.length > 0 &&
+		!filePath.split(path.sep).includes("..") &&
+		(isPathInsideProject(filePath, cwd) ||
+			(allowRoot && path.resolve(cwd, filePath) === path.resolve(cwd))) &&
+		!hasSymlinkComponent(filePath, cwd);
+	if (
+		!operands.every((operand, index) =>
+			safePath(operand, !moving || index === operands.length - 1),
+		)
+	)
+		return false;
+	if (moving) {
+		const target = operands[operands.length - 1];
+		try {
+			if (fs.statSync(path.resolve(cwd, target)).isDirectory()) {
+				return operands
+					.slice(0, -1)
+					.every((source) =>
+						safePath(path.join(target, path.basename(source)), false),
+					);
+			}
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
+		}
+	}
+	return true;
+}
+
 function isAllowedSimpleCommand(
 	command: string,
 	rules: string[],
@@ -1715,8 +1762,9 @@ function isAllowedSimpleCommand(
 	const parsed = parsedSimpleShellCommand(command, cwd);
 	return (
 		parsed !== undefined &&
-		!isBlockedCommand(parsed.command) &&
-		(isReadOnlyProcessOrManualCommand(parsed.command) ||
+		!isBlockedCommand(parsed.command, cwd) &&
+		(isWorkingDirectoryCommand(parsed.command, cwd) ||
+			isReadOnlyProcessOrManualCommand(parsed.command) ||
 			isReadOnlyMacOSCommand(parsed.command) ||
 			isReadOnlyCliCommand(parsed.command) ||
 			isReadOnlySimctlCommand(parsed.command) ||
@@ -1795,16 +1843,30 @@ export function evaluateBashPermissions({
 	denyRules,
 	sessionRules,
 }: BashPermissionRequest): BashPermissionResult {
-	const commands = splitShellCommands(command);
+	let commands = splitShellCommands(command);
+	const denyCandidates = commands?.length ? commands : [command];
+	// Directory changes and earlier moves can invalidate later path checks.
+	// Keep these compounds behind one approval, without weakening deny rules.
+	const names = commands?.map((candidate) => evaluatedShellWords(candidate)[0]);
+	if (
+		names?.some(
+			(name, index) =>
+				["mkdir", "mv"].includes(name) &&
+				names
+					.slice(0, index)
+					.some((previous) => ["cd", "pushd", "popd", "mv"].includes(previous)),
+		)
+	)
+		commands = undefined;
 	const commandCandidates = commands?.length ? commands : [command];
 	const deniedRule = denyRules.find((rule) =>
-		commandCandidates.some((candidate) => {
+		denyCandidates.some((candidate) => {
 			const executableCommand = parseOutputRedirections(candidate)?.command;
 			return (
 				commandMatchesRule(candidate, rule) ||
 				(executableCommand !== undefined &&
 					(commandMatchesRule(executableCommand, rule) ||
-						(commands !== undefined &&
+						(names !== undefined &&
 							commandMatchesEvaluatedRule(executableCommand, rule))))
 			);
 		}),
@@ -1834,7 +1896,7 @@ export function evaluateBashPermissions({
 				allowed,
 				parsedCommand: parsed?.command,
 				sessionApprovable:
-					parsed !== undefined && !isBlockedCommand(parsed.command),
+					parsed !== undefined && !isBlockedCommand(parsed.command, cwd),
 				defaultRule: suggestedRule(parsed?.command ?? candidate),
 			};
 		}),
