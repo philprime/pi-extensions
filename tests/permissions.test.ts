@@ -2609,6 +2609,10 @@ describe("process and manual inspection patterns from agent history", () => {
 		"sed -n '900,950p' source.ts",
 		"sed -n '165,194p'",
 		"sed -n '165p'",
+		"sed -n '38,63p;238,276p;374,397p'",
+		"sed -n '1p;3,5p' source.ts",
+		'sed -n "1p;3,5p" source.ts',
+		"cat source.ts | sed -n '1p;3,5p'",
 		"man -P cat ps | col -b | sed -n '1,180p'",
 		"cat source.ts | sed -n '1,260p'",
 	]) {
@@ -2618,6 +2622,48 @@ describe("process and manual inspection patterns from agent history", () => {
 			assert.deepEqual(selectCalls, []);
 		});
 	}
+
+	for (const command of [
+		"sed -n '1p;3p;w output.txt'",
+		"sed -n '1p;3p;e id'",
+		"sed -n '1p;3p' -i source.ts",
+		"sed -n '1p;3p' --unknown",
+		"sed -n '1p;3p' -e 'e id'",
+		"sed -n '1p;3p' -f script.sed",
+		"sed -n '1p;3p' -n -i source.ts",
+		"sed -n '1p;3p' --in-place=backup source.ts",
+		'sed -n "1p;$RANGE"',
+	]) {
+		test(`requires approval even with a broad sed rule: ${command}`, async () => {
+			for (const cwd of [createEmptyProject(), createProject(["sed *"])]) {
+				const { result, selectCalls } = await invoke(command, cwd);
+				assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+				assert.equal(selectCalls.length, 1);
+			}
+		});
+	}
+
+	test("prompts only for the unsafe stage after numeric sed print ranges", async () => {
+		const { result, selectCalls } = await invoke(
+			"sed -n '1p;3p' source.ts | custom-tool",
+			createEmptyProject(),
+		);
+		assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+		assert.equal(selectCalls.length, 1);
+		assert.ok(selectCalls[0].message.includes("custom-tool"));
+		assert.ok(!selectCalls[0].message.includes("sed -n"));
+	});
+
+	test("explicit deny overrides safe numeric sed print ranges", async () => {
+		const cwd = createEmptyProject();
+		writePiPermissions(cwd, { deny: ["Bash(sed:*)"] });
+		const { result, selectCalls } = await invoke("sed -n '1p;3p'", cwd);
+		assert.deepEqual(result, {
+			block: true,
+			reason: 'Bash command matches deny rule "Bash(sed:*)"',
+		});
+		assert.deepEqual(selectCalls, []);
+	});
 
 	for (const command of [
 		"sed -n",

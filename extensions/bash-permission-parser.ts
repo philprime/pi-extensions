@@ -1466,7 +1466,7 @@ function isBlockedCommand(command: string, cwd: string): boolean {
 		// Limit scripts to numeric prints or one slash-delimited substitution.
 		// Only the optional global flag is allowed, never execution or writes.
 		const isSafeScript =
-			/^\d+(,\d+)?p$/.test(script) ||
+			/^\d+(,\d+)?p(;\d+(,\d+)?p)*$/.test(script) ||
 			(!/[\r\n]/.test(script) &&
 				/^s\/(?:[^/\\]|\\.)*\/(?:[^/\\]|\\.)*\/g?$/.test(script));
 		return !isSafeScript || args.slice(1).some((word) => word.startsWith("-"));
