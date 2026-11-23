@@ -99,6 +99,7 @@ function extension(hasUI = true, select = async () => "Yes", cwd = project()) {
 			action: string,
 			args: Record<string, unknown> = {},
 			parentToolCallId?: string,
+			signal = new AbortController().signal,
 		) {
 			const tool = tools.get("background");
 			assert.ok(tool);
@@ -123,7 +124,7 @@ function extension(hasUI = true, select = async () => "Yes", cwd = project()) {
 			const result = await tool.execute(
 				"test",
 				{ action, ...args },
-				new AbortController().signal,
+				signal,
 				() => {},
 				ctx as never,
 			);
@@ -193,6 +194,107 @@ test("command starts multiple jobs and reads their output independently", async 
 	assert.match(result.content[0]?.text ?? "", /web.*running/);
 	await pi.command("stop web");
 	assert.match((await pi.tool("list")).content[0]?.text ?? "", /web.*stopped/);
+});
+
+test("wait blocks until completion and reports the exit code without approval", async () => {
+	const pi = extension();
+	await pi.command(
+		`start worker ${script("const fs = require('node:fs'); setInterval(() => { if (fs.existsSync('release')) { console.log('done'); process.exit(7); } }, 10)")}`,
+	);
+	const headless = extension(false, async () => "No", pi.ctx.cwd);
+	let completed = false;
+	const pending = headless.tool("wait", { name: "worker" }).then((result) => {
+		completed = true;
+		return result;
+	});
+	await delay(25);
+	assert.equal(completed, false);
+	fs.writeFileSync(path.join(pi.ctx.cwd, "release"), "");
+	const result = await pending;
+	assert.equal(result.isError, undefined);
+	assert.match(result.content[0].text, /worker.*exited.*7/);
+	assert.match(
+		(await pi.tool("logs", { name: "worker" })).content[0].text,
+		/done/,
+	);
+	assert.deepEqual(headless.prompts, []);
+});
+
+test("wait times out without stopping the job and can be retried", async () => {
+	const pi = extension();
+	await pi.command(`start web ${idle}`);
+	const result = await pi.tool("wait", { name: "web", timeout: 0.02 });
+	assert.equal(result.isError, undefined);
+	assert.match(result.content[0].text, /timed out/i);
+	assert.match((await pi.tool("list")).content[0].text, /web.*running/);
+	const pending = pi.tool("wait", { name: "web", timeout: 3 });
+	await pi.command("stop web");
+	assert.match((await pending).content[0].text, /web.*stopped/);
+});
+
+test("wait returns immediately for exited and stopped jobs", async () => {
+	const pi = extension();
+	await pi.command("start done printf done");
+	await until(async () =>
+		/done.*exited/.test((await pi.tool("list")).content[0].text),
+	);
+	assert.match(
+		(await pi.tool("wait", { name: "done" })).content[0].text,
+		/done.*exited.*0/,
+	);
+	await pi.command(`start web ${idle}`);
+	await pi.command("stop web");
+	assert.match(
+		(await pi.tool("wait", { name: "web" })).content[0].text,
+		/web.*stopped/,
+	);
+});
+
+test("cancelling a wait leaves the background job running", async () => {
+	const pi = extension();
+	await pi.command(`start web ${idle}`);
+	const controller = new AbortController();
+	const pending = pi.tool(
+		"wait",
+		{ name: "web" },
+		undefined,
+		controller.signal,
+	);
+	await delay(25);
+	controller.abort(new Error("Wait cancelled"));
+	const result = await pending;
+	assert.equal(result.isError, true);
+	assert.match(result.content[0].text, /Wait cancelled/);
+	assert.match((await pi.tool("list")).content[0].text, /web.*running/);
+});
+
+test("the bg command accepts a wait timeout in seconds", async () => {
+	const pi = extension();
+	await pi.command(`start web ${idle}`);
+	await pi.command("wait web 0.02");
+	assert.match(pi.notifications.at(-1) ?? "", /timed out/i);
+	assert.match((await pi.tool("list")).content[0].text, /web.*running/);
+	await pi.command("wait web invalid");
+	assert.match(pi.notifications.at(-1) ?? "", /timeout/i);
+});
+
+test("wait rejects missing jobs and invalid timeouts", async () => {
+	const pi = extension();
+	const missing = await pi.tool("wait", { name: "missing" });
+	assert.equal(missing.isError, true);
+	assert.match(missing.content[0].text, /Unknown background job/);
+	await pi.command(`start web ${idle}`);
+	for (const timeout of [
+		0,
+		-1,
+		Number.NaN,
+		Number.POSITIVE_INFINITY,
+		2147484,
+	]) {
+		const result = await pi.tool("wait", { name: "web", timeout });
+		assert.equal(result.isError, true);
+		assert.match(result.content[0].text, /timeout/i);
+	}
 });
 
 test("listing jobs does not repeat command arguments", async () => {
