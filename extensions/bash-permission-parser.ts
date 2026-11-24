@@ -1109,6 +1109,193 @@ function isReadOnlyOpenSSLCommand(words: string[]): boolean {
 	}
 }
 
+const BINARY_INSPECTION_TOOLS = new Set([
+	"otool",
+	"nm",
+	"ar",
+	"lipo",
+	"dwarfdump",
+	"size",
+]);
+
+function isReadOnlyBinaryCommand(command: string): boolean {
+	const words = literalLintWords(command);
+	// LLVM tools expand response files before option parsing, even when quoted.
+	if (!words || words.some((word) => word.startsWith("@"))) return false;
+	const [name, ...args] = words;
+	if (!BINARY_INSPECTION_TOOLS.has(name)) return false;
+
+	if (name === "ar") {
+		const operation = args.shift() ?? "";
+		if (!/^-?[tpv]+$/.test(operation)) return false;
+		if ([...operation].filter((flag) => "tp".includes(flag)).length !== 1)
+			return false;
+		return (
+			args.length > 0 &&
+			args.every((arg) => !arg.startsWith("-") || /^-v+$/.test(arg))
+		);
+	}
+	if (name === "lipo") {
+		return (
+			args.some((arg) =>
+				["-info", "-archs", "-detailed_info", "-verify_arch"].includes(arg),
+			) &&
+			hasOnlyInspectionOptions(args, ["-info", "-archs", "-detailed_info"], {
+				"-verify_arch": null,
+				"-arch": null,
+			})
+		);
+	}
+
+	// Both tools accept a segment and section after -s, not one option value.
+	if (name === "otool" || name === "nm") {
+		for (let index = 0; index < args.length; index++) {
+			if (args[index] !== "-s") continue;
+			const section = args.slice(index + 1, index + 3);
+			if (
+				section.length !== 2 ||
+				section.some((value) => !value || value.startsWith("-"))
+			)
+				return false;
+			args.splice(index, 3);
+			index--;
+		}
+	}
+	if (name === "otool") {
+		return hasOnlyInspectionOptions(
+			args.flatMap((arg) =>
+				arg !== "-arch" && /^-[fahlLDtdorSTMRIHGvVcXmqQjCPxB]+$/.test(arg)
+					? [...arg.slice(1)].map((flag) => `-${flag}`)
+					: [arg],
+			),
+			[..."fahlLDtdorSTMRIHGvVcXmqQjCPxB"]
+				.map((flag) => `-${flag}`)
+				.concat("--version"),
+			{ "-arch": null, "-p": null, "-mcpu": null },
+		);
+	}
+	if (name === "nm") {
+		return hasOnlyInspectionOptions(
+			args.flatMap((arg) =>
+				/^-[AaBCDghjlmnopPrSUuVvWx]+$/.test(arg)
+					? [...arg.slice(1)].map((flag) => `-${flag}`)
+					: [arg],
+			),
+			[
+				...[..."AaBCDghjlmnopPrSUuVvWx"].map((flag) => `-${flag}`),
+				"--help",
+				"--version",
+				"--debug-syms",
+				"--defined-only",
+				"--demangle",
+				"--dynamic",
+				"--export-symbols",
+				"--extern-only",
+				"--line-numbers",
+				"--no-demangle",
+				"--no-llvm-bc",
+				"--no-sort",
+				"--no-weak",
+				"--numeric-sort",
+				"--portability",
+				"--print-armap",
+				"--print-file-name",
+				"--print-size",
+				"--quiet",
+				"--reverse-sort",
+				"--size-sort",
+				"--special-syms",
+				"--undefined-only",
+				"--add-dyldinfo",
+				"--add-inlinedinfo",
+				"--dyldinfo-only",
+				"--no-dyldinfo",
+				"--no-rsrc",
+			],
+			{
+				"--format": ["bsd", "posix", "sysv", "darwin", "just-symbols"],
+				"-f": ["bsd", "posix", "sysv", "darwin", "just-symbols"],
+				"--radix": ["o", "d", "x"],
+				"-t": ["o", "d", "x"],
+				"--arch": null,
+				"-X": ["32", "64", "32_64", "any"],
+			},
+		);
+	}
+	if (name === "size") {
+		return hasOnlyInspectionOptions(
+			args.flatMap((arg) =>
+				/^-[mlx]+$/.test(arg)
+					? [...arg.slice(1)].map((flag) => `-${flag}`)
+					: [arg],
+			),
+			["-m", "-l", "-x"],
+			{ "-arch": null },
+		);
+	}
+	return hasOnlyInspectionOptions(
+		args.flatMap((arg) =>
+			/^-[aFcipuvx]+$/.test(arg)
+				? [...arg.slice(1)].map((flag) => `-${flag}`)
+				: [arg],
+		),
+		[
+			...[..."aFcipuvx"].map((flag) => `-${flag}`),
+			"--help",
+			"--help-list",
+			"--version",
+			"--all",
+			"--uuid",
+			"--verify",
+			"--quiet",
+			"--color",
+			"--diff",
+			"--dwo",
+			"--ignore-case",
+			"--find-all-apple",
+			"--regex",
+			"--show-children",
+			"--show-form",
+			"--show-parents",
+			"--show-section-sizes",
+			"--show-sources",
+			"--statistics",
+			"--summarize-types",
+			"--verbose",
+			"--debug-info",
+			"--debug-line",
+			"--debug-frame",
+			"--debug-loc",
+			"--debug-loclists",
+			"--debug-ranges",
+			"--debug-rnglists",
+			"--debug-types",
+		],
+		{
+			"--arch": null,
+			"--find": null,
+			"-f": null,
+			"--name": null,
+			"-n": null,
+			"--lookup": /^(?:0x[0-9a-fA-F]+|\d+)$/,
+			"--debug-info": /^(?:0x[0-9a-fA-F]+|\d+)$/,
+			"--debug-line": /^(?:0x[0-9a-fA-F]+|\d+)$/,
+			"--debug-frame": /^(?:0x[0-9a-fA-F]+|\d+)$/,
+			"--debug-loc": /^(?:0x[0-9a-fA-F]+|\d+)$/,
+			"--debug-loclists": /^(?:0x[0-9a-fA-F]+|\d+)$/,
+			"--debug-ranges": /^(?:0x[0-9a-fA-F]+|\d+)$/,
+			"--debug-rnglists": /^(?:0x[0-9a-fA-F]+|\d+)$/,
+			"--debug-types": /^(?:0x[0-9a-fA-F]+|\d+)$/,
+			"--recurse-depth": /^\d+$/,
+			"-r": /^\d+$/,
+			"--parent-recurse-depth": /^\d+$/,
+			"--error-display": ["quiet", "summary", "details", "full"],
+			"--filter-child-tag": null,
+			"-t": null,
+		},
+	);
+}
+
 function isReadOnlyDeveloperCommand(words: string[]): boolean {
 	if (words.some((word) => /[$`\\\\"'*?[\]{}~]/.test(word))) return false;
 	if (words[0] === "codesign") return isReadOnlyCodesignCommand(words);
@@ -1127,7 +1314,8 @@ function isReadOnlyCliCommand(command: string): boolean {
 		isReadOnlyApiHelpCommand(words) ||
 		isReadOnlySentryHelpCommand(words) ||
 		isReadOnlyApiCommand(words) ||
-		isReadOnlyDeveloperCommand(words)
+		isReadOnlyDeveloperCommand(words) ||
+		isReadOnlyBinaryCommand(command)
 	);
 }
 
@@ -1438,6 +1626,8 @@ function isBlockedCommand(command: string, cwd: string): boolean {
 		return !isWorkingDirectoryCommand(command, cwd);
 	if (name === undefined) return false;
 	if (BLOCKED_FIRST_WORDS.has(name)) return true;
+	if (BINARY_INSPECTION_TOOLS.has(name))
+		return !isReadOnlyBinaryCommand(command);
 	if (name === "actionlint") return !isReadOnlyActionlintCommand(command);
 	if (name === "clang-format") return !isReadOnlyClangFormatCommand(command);
 	if (["codesign", "security", "openssl"].includes(name)) {

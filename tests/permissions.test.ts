@@ -2241,6 +2241,123 @@ test("a stuck Bash permission check reports an error and requires one-time appro
 	assert.equal(recovered, null);
 }, 10_000);
 
+describe("binary development tool permissions", () => {
+	beforeEach(() => {
+		vi.stubEnv("HOME", createEmptyProject());
+	});
+	afterEach(() => {
+		vi.unstubAllEnvs();
+	});
+
+	for (const command of [
+		"otool -L 'build/My App'",
+		"otool -arch arm64 -hv -l app",
+		"otool -s __TEXT __cstring app",
+		"otool -tvV -p _main -mcpu=apple-m1 app",
+		"otool --version",
+		"nm -gU app",
+		"nm --defined-only --format=posix --radix=x app",
+		"nm --arch=arm64 --arch=x86_64 -s __TEXT __text app",
+		"nm -f darwin -t x -X any app",
+		"ar t lib.a",
+		"ar -tv 'build/My Library.a'",
+		"ar -p lib.a member.o",
+		"ar -t -v lib.a",
+		"lipo app -info",
+		"lipo -archs app",
+		"lipo app -verify_arch arm64 x86_64",
+		"dwarfdump --uuid 'build/My App.dSYM'",
+		"dwarfdump --verify --quiet app",
+		"dwarfdump --debug-info=0x10 --arch=arm64 app",
+		"dwarfdump --name main --name=other --show-children app",
+		"size -mlx -arch arm64 app",
+		"otool -L app | head -20",
+		"otool -L app > inspection.txt",
+	]) {
+		test(`allows read-only binary inspection: ${command}`, async () => {
+			const { result, selectCalls } = await invoke(command, createProject([]));
+			assert.equal(result, undefined);
+			assert.deepEqual(selectCalls, []);
+		});
+	}
+
+	for (const command of [
+		"ar -x lib.a",
+		"ar rcs lib.a member.o",
+		"ar -ts lib.a",
+		"ar -t -s lib.a",
+		"ar -M",
+		"ar --plugin=./plugin.so -t lib.a",
+		"lipo app -thin arm64 -o output",
+		"lipo -info app -create -output output",
+		"lipo -info app -unknown",
+		"otool -unknown app",
+		"otool -arch",
+		"otool -s __TEXT",
+		"nm --plugin=./plugin.so app",
+		"nm --format=unknown app",
+		"nm --radix=x --radix=unknown app",
+		"nm -s __TEXT",
+		"nm @options.rsp",
+		"nm '@options.rsp'",
+		"nm -'plugin'=./plugin.so app",
+		"nm --unknown app",
+		"dwarfdump -o output app",
+		"dwarfdump --verify-json=output.json app",
+		"dwarfdump --uuid -o=output app",
+		"dwarfdump @options.rsp",
+		"dwarfdump --arch",
+		"dwarfdump --unknown app",
+		"size @options.rsp",
+		"size --unknown app",
+		"otool $FLAGS app",
+		"nm *.o",
+		// biome-ignore lint/suspicious/noTemplateCurlyInString: Test literal shell expansion, not JavaScript interpolation.
+		"ar t ${ARCHIVE}",
+		"lipo -info build/{one,two}",
+		"dwarfdump --uuid $(get-file)",
+		"otool -L app > /etc/pi-binary-inspection-output",
+	]) {
+		for (const broad of [false, true]) {
+			test(`requires approval${broad ? " despite broad rules" : ""}: ${command}`, async () => {
+				const cwd = createProject(
+					broad
+						? ["otool:*", "nm:*", "ar:*", "lipo:*", "dwarfdump:*", "size:*"]
+						: [],
+				);
+				const { result, selectCalls } = await invoke(command, cwd);
+				assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+				assert.equal(selectCalls.length, 1);
+			});
+		}
+	}
+
+	test("prompts only for the mutating archive stage", async () => {
+		const { result, selectCalls } = await invoke(
+			"otool -L app && ar -x lib.a",
+			createProject([]),
+		);
+		assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+		assert.equal(selectCalls.length, 1);
+		assert.match(selectCalls[0].message, /ar -x lib.a/);
+	});
+
+	for (const tool of ["otool", "nm", "ar", "lipo", "dwarfdump", "size"]) {
+		test(`explicit deny overrides ${tool} inspection`, async () => {
+			const cwd = createProject([]);
+			writePiPermissions(cwd, { deny: [`Bash(${tool}:*)`] });
+			const args =
+				tool === "ar" ? "t lib.a" : tool === "lipo" ? "-info app" : "app";
+			const { result, selectCalls } = await invoke(`${tool} ${args}`, cwd);
+			assert.deepEqual(result, {
+				block: true,
+				reason: `Bash command matches deny rule "Bash(${tool}:*)"`,
+			});
+			assert.deepEqual(selectCalls, []);
+		});
+	}
+});
+
 describe("actionlint default permissions", () => {
 	beforeEach(() => {
 		vi.stubEnv("HOME", createEmptyProject());
