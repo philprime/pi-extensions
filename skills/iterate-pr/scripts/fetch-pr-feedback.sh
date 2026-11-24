@@ -81,7 +81,7 @@ gh api graphql \
   ' | jq '
     def author_login: .author.login // "";
     def review_bot:
-      author_login | test("^(warden|cursor|bugbot|seer|copilot|codex|claude|codeql)"; "i");
+      author_login | test("^(warden|cursor|bugbot|seer|copilot|codex|codeql)"; "i");
     def info_bot:
       author_login
       | test("^(codecov|dependabot|renovate|github-actions|mergify|semantic-release|sonarcloud|snyk)|bot$|\\[bot\\]$"; "i");
