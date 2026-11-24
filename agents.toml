@@ -1,5 +1,5 @@
 version = 1
-agents = ["claude", "cursor", "codex"]
+agents = ["cursor", "codex"]
 
 [trust]
 github_orgs = ["philprime", "getsentry"]

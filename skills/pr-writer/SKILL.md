@@ -54,7 +54,7 @@ Rules:
 - Use the narrowest accurate type and scope.
 - Use imperative present tense.
 - No trailing period.
-- No `[codex]`, `[claude]`, `[ai]`, `[bot]`, `[wip]`, agent/tool attribution, or automation labels.
+- No LLM, agent, or tool attribution, automation labels, or work-in-progress tags.
 - No vague titles like `update`, `cleanup`, `misc`, `fix stuff`, or `address feedback`.
 
 5. Write the body:
