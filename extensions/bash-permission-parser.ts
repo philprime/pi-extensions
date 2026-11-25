@@ -1218,6 +1218,7 @@ function isReadOnlyBinaryCommand(command: string): boolean {
 				"--radix": ["o", "d", "x"],
 				"-t": ["o", "d", "x"],
 				"--arch": null,
+				"-arch": null,
 				"-X": ["32", "64", "32_64", "any"],
 			},
 		);

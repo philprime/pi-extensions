@@ -2256,6 +2256,9 @@ describe("binary development tool permissions", () => {
 		"otool -tvV -p _main -mcpu=apple-m1 app",
 		"otool --version",
 		"nm -gU app",
+		"nm -arch arm64 -gU app",
+		"nm -arch 'arm64' -arch x86_64 -gU app",
+		"nm -arch arm64 -gU /tmp/pr9722-static-verification/archive/Sentry/macosx.xcarchive/Products/Library/Frameworks/Sentry.framework/Versions/A/Sentry | grep -E '(_timeIntervalToNanoseconds|_getAbsoluteTime|_OBJC_CLASS_\\$_SentryProfilingSystemMetrics)'",
 		"nm --defined-only --format=posix --radix=x app",
 		"nm --arch=arm64 --arch=x86_64 -s __TEXT __text app",
 		"nm -f darwin -t x -X any app",
@@ -2295,6 +2298,9 @@ describe("binary development tool permissions", () => {
 		"otool -arch",
 		"otool -s __TEXT",
 		"nm --plugin=./plugin.so app",
+		"nm -arch",
+		"nm -arch arm64 --plugin=./plugin.so app",
+		"nm -arch arm64 @options.rsp",
 		"nm --format=unknown app",
 		"nm --radix=x --radix=unknown app",
 		"nm -s __TEXT",
@@ -2332,22 +2338,30 @@ describe("binary development tool permissions", () => {
 		}
 	}
 
-	test("prompts only for the mutating archive stage", async () => {
-		const { result, selectCalls } = await invoke(
-			"otool -L app && ar -x lib.a",
-			createProject([]),
-		);
-		assert.deepEqual(result, { block: true, reason: "Blocked by user" });
-		assert.equal(selectCalls.length, 1);
-		assert.match(selectCalls[0].message, /ar -x lib.a/);
-	});
+	for (const command of [
+		"otool -L app && ar -x lib.a",
+		"nm -arch arm64 -gU app && ar -x lib.a",
+	]) {
+		test(`prompts only for the mutating archive stage: ${command}`, async () => {
+			const { result, selectCalls } = await invoke(command, createProject([]));
+			assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+			assert.equal(selectCalls.length, 1);
+			assert.match(selectCalls[0].message, /ar -x lib.a/);
+		});
+	}
 
 	for (const tool of ["otool", "nm", "ar", "lipo", "dwarfdump", "size"]) {
 		test(`explicit deny overrides ${tool} inspection`, async () => {
 			const cwd = createProject([]);
 			writePiPermissions(cwd, { deny: [`Bash(${tool}:*)`] });
 			const args =
-				tool === "ar" ? "t lib.a" : tool === "lipo" ? "-info app" : "app";
+				tool === "ar"
+					? "t lib.a"
+					: tool === "lipo"
+						? "-info app"
+						: tool === "nm"
+							? "-arch arm64 -gU app"
+							: "app";
 			const { result, selectCalls } = await invoke(`${tool} ${args}`, cwd);
 			assert.deepEqual(result, {
 				block: true,
