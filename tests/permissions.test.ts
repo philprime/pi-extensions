@@ -2538,6 +2538,102 @@ describe("actionlint default permissions", () => {
 	});
 });
 
+describe("shellcheck default permissions", () => {
+	beforeEach(() => {
+		vi.stubEnv("HOME", createEmptyProject());
+	});
+	afterEach(() => {
+		vi.unstubAllEnvs();
+	});
+
+	for (const command of [
+		"shellcheck",
+		"shellcheck --help",
+		"shellcheck -V",
+		"shellcheck --version",
+		"shellcheck --list-optional",
+		"shellcheck script.sh 'Script File.sh'",
+		"shellcheck -",
+		"shellcheck --norc --check-sourced --external-sources script.sh",
+		"shellcheck -ax script.sh",
+		"shellcheck -s bash -S warning -f json script.sh",
+		"shellcheck -sbash -Swarning -fjson script.sh",
+		"shellcheck --shell=bash --severity=style --format=diff script.sh",
+		"shellcheck -e SC2086,SC2046 -i 1000,2000 -eSC2016 script.sh",
+		"shellcheck --exclude=SC2086 --include=SC2046 script.sh",
+		"shellcheck -o all --enable=check-unassigned-uppercase script.sh",
+		"shellcheck -P SCRIPTDIR:./lib --source-path=./scripts script.sh",
+		"shellcheck --rcfile '.config/shellcheck rc' --norc script.sh",
+		"shellcheck --extended-analysis=false --wiki-link-count=0 script.sh",
+		"shellcheck -W3 -Cauto script.sh",
+		"shellcheck -C --color --color=never script.sh",
+		"shellcheck --format checkstyle --format=gcc script.sh",
+		"shellcheck -- -script.sh",
+		"cat script.sh | shellcheck -s bash - | head -20",
+	]) {
+		test(`automatically allows read-only analysis: ${command}`, async () => {
+			const { result, selectCalls } = await invoke(command, createProject([]));
+			assert.equal(result, undefined);
+			assert.deepEqual(selectCalls, []);
+		});
+	}
+
+	for (const command of [
+		"shellcheck --unknown script.sh",
+		"shellcheck --help --unknown",
+		"shellcheck --output=report.json script.sh",
+		"shellcheck -'unknown' script.sh",
+		"shellcheck --format",
+		"shellcheck -s",
+		"shellcheck --rcfile",
+		"shellcheck --shell=unknown script.sh",
+		"shellcheck -f json --format=unknown script.sh",
+		"shellcheck --color=unknown script.sh",
+		"shellcheck --extended-analysis=unknown script.sh",
+		"shellcheck -W --unknown script.sh",
+		"shellcheck --rcfile=--unknown script.sh",
+		"shellcheck @arguments.txt",
+		"shellcheck '@arguments.txt'",
+		"shellcheck --rcfile @arguments.txt script.sh",
+		"shellcheck $SHELLCHECK_FLAGS script.sh",
+		"shellcheck *.sh",
+		"shellcheck scripts/{one,two}.sh",
+		'shellcheck "$(custom-tool)"',
+		"shellcheck `custom-tool`",
+		"shellcheck script.sh > .shellcheck-report.json",
+	]) {
+		for (const broadRule of [false, true]) {
+			test(`requires approval${broadRule ? " despite a broad rule" : ""}: ${command}`, async () => {
+				const cwd = createProject(broadRule ? ["shellcheck:*"] : []);
+				const { result, selectCalls } = await invoke(command, cwd);
+				assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+				assert.equal(selectCalls.length, 1);
+			});
+		}
+	}
+
+	test("only skips safe shellcheck stages in compound commands", async () => {
+		const { result, selectCalls } = await invoke(
+			"shellcheck --format=diff script.sh | git apply",
+			createProject([]),
+		);
+		assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+		assert.equal(selectCalls.length, 1);
+		assert.match(selectCalls[0].message, /git apply/);
+	});
+
+	test("explicit denies override read-only shellcheck defaults", async () => {
+		const cwd = createProject([]);
+		writePiPermissions(cwd, { deny: ["Bash(shellcheck:*)"] });
+		const { result, selectCalls } = await invoke("shellcheck script.sh", cwd);
+		assert.deepEqual(result, {
+			block: true,
+			reason: 'Bash command matches deny rule "Bash(shellcheck:*)"',
+		});
+		assert.deepEqual(selectCalls, []);
+	});
+});
+
 describe("clang-format default permissions", () => {
 	beforeEach(() => {
 		vi.stubEnv("HOME", createEmptyProject());
