@@ -1758,6 +1758,80 @@ test("allows output redirection to new and existing files in /tmp", async () => 
 	}
 });
 
+test("allows workflow inspection through yq and jq with output redirected to /tmp", async () => {
+	const projectDirectory = createProject([]);
+	const { result, selectCalls } = await invoke(
+		`yq eval-all -o=json -I=0 '{"file": filename, "env": .env, "jobs": .jobs}' .github/workflows/*.yml | jq -s '[.[] | {file, env, jobs: (.jobs | to_entries | map({id: .key, env: .value.env, uses: .value.uses, with: .value.with, matrix: .value.strategy.matrix, steps: [.value.steps[]? | select(.run != null) | {name, env, run}]}))}]' > /tmp/sentry-all-workflows.json`,
+		projectDirectory,
+	);
+
+	assert.equal(result, undefined);
+	assert.deepEqual(selectCalls, []);
+});
+
+test("allows yq output formats without treating option values as flags", async () => {
+	const cwd = createProject([]);
+	for (const command of [
+		"yq eval-all -o=json -I=0 '.' input.yml",
+		"yq ea -ojson -I0 '.' input.yml",
+		"yq eval -o json -p ini '.' input.yml",
+		"yq -pini -fprocess -ojson '.' input.yml",
+		"yq e -Pojson '.' input.yml",
+		"yq -o='json' -o=ini '.' input.yml",
+		"yq --output-format=json --indent=0 '.' input.yml",
+	]) {
+		const { result, selectCalls } = await invoke(command, cwd);
+		assert.equal(result, undefined, command);
+		assert.deepEqual(selectCalls, [], command);
+	}
+});
+
+test("keeps unsafe yq options behind approval even with broad allow rules", async () => {
+	for (const cwd of [createProject([]), createProject(["yq *"])]) {
+		for (const command of [
+			"yq -o=json -i '.' input.yml",
+			"yq -o json -i '.' input.yml",
+			"yq -o=ini -o=json -i '.' input.yml",
+			"yq -Pio=json '.' input.yml",
+			"yq -o=json -s '.name' input.yml",
+			"yq -Pso=json '.' input.yml",
+			"yq -o=json --inplace=true '.' input.yml",
+			"yq -o=json --split-exp='.name' input.yml",
+			"yq -o=json --split-exp-file=split.yq '.' input.yml",
+			"yq -o=json --security-enable-system-operator 'system(\"id\")' input.yml",
+		]) {
+			const { result, selectCalls } = await invoke(command, cwd);
+			assert.deepEqual(
+				result,
+				{ block: true, reason: "Blocked by user" },
+				command,
+			);
+			assert.equal(selectCalls.length, 1, command);
+		}
+	}
+});
+
+test("prompts only for the unsafe stage after read-only yq inspection", async () => {
+	const { result, selectCalls } = await invoke(
+		"yq -o=json '.' input.yml | yq -i '.' output.yml",
+		createProject([]),
+	);
+	assert.deepEqual(result, { block: true, reason: "Blocked by user" });
+	assert.equal(selectCalls.length, 1);
+	assert.match(selectCalls[0].message, /yq -i/);
+});
+
+test("preserves explicit deny precedence for read-only yq inspection", async () => {
+	const cwd = createProject([]);
+	writePiPermissions(cwd, { deny: ["Bash(yq *)"] });
+	const { result, selectCalls } = await invoke("yq -o=json '.' input.yml", cwd);
+	assert.deepEqual(result, {
+		block: true,
+		reason: 'Bash command matches deny rule "Bash(yq *)"',
+	});
+	assert.deepEqual(selectCalls, []);
+});
+
 test("allows an allowlisted make test with output redirected to /tmp", async () => {
 	const projectDirectory = createProject(["make test"]);
 	const { result, selectCalls } = await invoke(

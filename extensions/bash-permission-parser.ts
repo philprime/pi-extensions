@@ -1612,12 +1612,25 @@ function isReadOnlyGitInspectionCommand(command: string): boolean {
 	);
 }
 
-function hasShortOption(words: string[], options: string): boolean {
-	return words.some(
-		(word) =>
-			/^-[^-]/.test(word) &&
-			[...word.slice(1)].some((character) => options.includes(character)),
-	);
+function hasShortOption(
+	words: string[],
+	options: string,
+	valueOptions = "",
+): boolean {
+	for (let index = 0; index < words.length; index++) {
+		const word = words[index];
+		if (!/^-[^-]/.test(word)) continue;
+		for (let offset = 1; offset < word.length; offset++) {
+			const character = word[offset];
+			if (options.includes(character)) return true;
+			if (valueOptions.includes(character)) {
+				// A value consumes the rest of the cluster (or the next argument).
+				if (offset === word.length - 1) index++;
+				break;
+			}
+		}
+	}
+	return false;
 }
 
 function isBlockedCommand(command: string, cwd: string): boolean {
@@ -1683,7 +1696,7 @@ function isBlockedCommand(command: string, cwd: string): boolean {
 	}
 	if (name === "yq") {
 		return (
-			hasShortOption(args, "is") ||
+			hasShortOption(args, "is", "opIf") ||
 			args.some((word) =>
 				/^(--inplace|--split-exp(?:-file)?|--security-enable-system-operator)(=|$)/.test(
 					word,
