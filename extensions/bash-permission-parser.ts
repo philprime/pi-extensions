@@ -37,6 +37,7 @@ export const DEFAULT_ALLOW_RULES: string[] = [
 	// Read-only linting and stdout formatting, constrained by isBlockedCommand.
 	"actionlint:*",
 	"clang-format:*",
+	"shellcheck:*",
 	// File and directory inspection
 	"cat:*",
 	"head:*",
@@ -872,6 +873,84 @@ function isReadOnlyActionlintCommand(command: string): boolean {
 	return true;
 }
 
+function isReadOnlyShellcheckCommand(command: string): boolean {
+	const words = literalLintWords(command);
+	if (!words || words.some((word) => word.startsWith("@"))) return false;
+	const shortOptions: Record<string, string> = {
+		a: "--check-sourced",
+		x: "--external-sources",
+		V: "--version",
+		C: "--color",
+		i: "--include",
+		e: "--exclude",
+		f: "--format",
+		o: "--enable",
+		P: "--source-path",
+		s: "--shell",
+		S: "--severity",
+		W: "--wiki-link-count",
+	};
+	const args: string[] = [];
+	for (let index = 1; index < words.length; index++) {
+		const word = words[index];
+		if (word === "--") break;
+		if (!/^-[^-]/.test(word)) {
+			args.push(word);
+			continue;
+		}
+		for (let offset = 1; offset < word.length; offset++) {
+			const letter = word[offset];
+			const option = shortOptions[letter];
+			if (!option) return false;
+			args.push(option);
+			if ("axV".includes(letter)) continue;
+			const attached = word.slice(offset + 1);
+			if (letter === "C") {
+				if (attached) args[args.length - 1] = `${option}=${attached}`;
+			} else {
+				const value = attached || words[++index];
+				if (value === undefined) return false;
+				args.push(value);
+			}
+			break;
+		}
+	}
+	return hasOnlyInspectionOptions(
+		args,
+		[
+			"-",
+			"--help",
+			"--version",
+			"--list-optional",
+			"--norc",
+			"--check-sourced",
+			"--external-sources",
+			"--color",
+		],
+		{
+			"--color": ["auto", "always", "never"],
+			"--include": /^(?:SC)?\d+(?:,(?:SC)?\d+)*$/,
+			"--exclude": /^(?:SC)?\d+(?:,(?:SC)?\d+)*$/,
+			"--extended-analysis": ["true", "false"],
+			"--format": [
+				"checkstyle",
+				"diff",
+				"gcc",
+				"json",
+				"json1",
+				"quiet",
+				"tty",
+			],
+			"--rcfile": null,
+			"--enable": /^[a-z][a-z0-9-]*(?:,[a-z][a-z0-9-]*)*$/,
+			"--source-path": null,
+			"--shell": ["sh", "bash", "dash", "ksh", "busybox"],
+			"--severity": ["error", "warning", "info", "style"],
+			"--wiki-link-count": /^\d+$/,
+		},
+	);
+}
+
 function isReadOnlyClangFormatCommand(command: string): boolean {
 	const words = literalLintWords(command);
 	// LLVM expands response files before parsing options, even quoted values.
@@ -1644,6 +1723,7 @@ function isBlockedCommand(command: string, cwd: string): boolean {
 		return !isReadOnlyBinaryCommand(command);
 	if (name === "actionlint") return !isReadOnlyActionlintCommand(command);
 	if (name === "clang-format") return !isReadOnlyClangFormatCommand(command);
+	if (name === "shellcheck") return !isReadOnlyShellcheckCommand(command);
 	if (["codesign", "security", "openssl"].includes(name)) {
 		return !isReadOnlyDeveloperCommand(words);
 	}
